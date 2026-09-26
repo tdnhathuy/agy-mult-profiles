@@ -45,8 +45,36 @@ enum Commands {
         #[arg(short = 'y', long)]
         yes: bool,
     },
+    /// Manage profile aliases
+    Alias {
+        #[command(subcommand)]
+        command: Option<AliasCommands>,
+    },
     /// Show version or ping
     Ping,
+}
+
+#[derive(Subcommand)]
+enum AliasCommands {
+    /// Set an alias for a profile
+    Set {
+        /// Alias name
+        alias: String,
+        /// Target profile name
+        profile: String,
+    },
+    /// Remove an alias
+    Rm {
+        /// Alias name
+        alias: String,
+    },
+    /// List all aliases
+    #[command(alias = "ls")]
+    List {
+        /// Output in JSON format
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() {
@@ -59,6 +87,14 @@ fn main() {
         Some(Commands::List { json }) => commands::profile::cmd_list(*json),
         Some(Commands::Default { profile }) => commands::profile::cmd_default(profile.as_deref()),
         Some(Commands::Rm { name, yes }) => commands::profile::cmd_rm(name, *yes),
+        Some(Commands::Alias { command }) => match command {
+            Some(AliasCommands::Set { alias, profile }) => {
+                commands::alias::cmd_alias_set(alias, profile)
+            }
+            Some(AliasCommands::Rm { alias }) => commands::alias::cmd_alias_rm(alias),
+            Some(AliasCommands::List { json }) => commands::alias::cmd_alias_list(*json),
+            None => commands::alias::cmd_alias_list(false),
+        },
         Some(Commands::Ping) => {
             println!("pong");
             Ok(())
