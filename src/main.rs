@@ -1,3 +1,4 @@
+mod agy;
 mod config;
 
 use clap::{Parser, Subcommand};
