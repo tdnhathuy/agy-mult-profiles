@@ -1,7 +1,11 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "agyp", version, about = "Antigravity Multi-Profile CLI Manager")]
+#[command(
+    name = "agyp",
+    version,
+    about = "Antigravity Multi-Profile CLI Manager"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
