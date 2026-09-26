@@ -50,6 +50,34 @@ enum Commands {
         #[command(subcommand)]
         command: Option<AliasCommands>,
     },
+    /// Run a prompt using a profile
+    #[command(alias = "p", alias = "-p")]
+    Prompt {
+        /// Profile name or alias
+        profile: Option<String>,
+        /// Prompt text to send (reads from stdin if omitted)
+        prompt: Option<String>,
+        /// Model override for agy (e.g. gemini-2.5-flash)
+        #[arg(long)]
+        model: Option<String>,
+        /// Directory to attach to agy context
+        #[arg(long = "add-dir")]
+        add_dir: Vec<String>,
+        /// Do not automatically skip permissions (which is enabled by default)
+        #[arg(long)]
+        no_skip_perm: bool,
+        /// Output result in JSON format
+        #[arg(long)]
+        json: bool,
+    },
+    /// Execute arbitrary agy commands under a profile
+    Exec {
+        /// Profile name or alias
+        profile: String,
+        /// Raw arguments to pass to agy (use -- before flags)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Show version or ping
     Ping,
 }
@@ -95,6 +123,22 @@ fn main() {
             Some(AliasCommands::List { json }) => commands::alias::cmd_alias_list(*json),
             None => commands::alias::cmd_alias_list(false),
         },
+        Some(Commands::Prompt {
+            profile,
+            prompt,
+            model,
+            add_dir,
+            no_skip_perm,
+            json,
+        }) => commands::prompt::cmd_prompt(
+            profile.as_deref(),
+            prompt.as_deref(),
+            model.as_deref(),
+            add_dir,
+            *no_skip_perm,
+            *json,
+        ),
+        Some(Commands::Exec { profile, args }) => commands::exec::cmd_exec(profile, args),
         Some(Commands::Ping) => {
             println!("pong");
             Ok(())
