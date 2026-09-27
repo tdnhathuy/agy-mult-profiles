@@ -78,8 +78,45 @@ pub fn extract_email_from_token_string(token_raw: &str) -> Option<String> {
     None
 }
 
+/// Parses output from `security find-generic-password`.
+/// Tri-state outcome:
+/// - Ok(Some(token)) if exit code 0 and non-empty stdout
+/// - Ok(None) ONLY if exit code 44 (errSecItemNotFound) or exact "item could not be found"
+/// - Err(error_message) for all other exit codes, locked keychain, permission denied, or launch errors
+pub fn parse_security_find_output(
+    status_code: Option<i32>,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> Result<Option<String>, String> {
+    if status_code == Some(0) {
+        let token = String::from_utf8_lossy(stdout).trim().to_string();
+        if token.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(token))
+        }
+    } else if status_code == Some(44)
+        || String::from_utf8_lossy(stderr).contains("could not be found")
+    {
+        Ok(None)
+    } else {
+        let err_detail = String::from_utf8_lossy(stderr).trim().to_string();
+        let code_str = match status_code {
+            Some(c) => format!("code {c}"),
+            None => "terminated by signal".to_string(),
+        };
+        Err(format!(
+            "Failed to read keychain token ({code_str}): {err_detail}"
+        ))
+    }
+}
+
 /// Reads the generic password token from macOS Keychain for service="gemini", account="antigravity".
-pub fn read_system_keychain_token() -> Option<String> {
+/// Returns a tri-state Result:
+/// - Ok(Some(token)) if present
+/// - Ok(None) if absent (errSecItemNotFound)
+/// - Err(...) on any command, locked, or permission error
+pub fn read_system_keychain_token() -> Result<Option<String>, String> {
     let output = Command::new("security")
         .args([
             "find-generic-password",
@@ -90,15 +127,9 @@ pub fn read_system_keychain_token() -> Option<String> {
             "-w",
         ])
         .output()
-        .ok()?;
+        .map_err(|e| format!("Failed to invoke security tool: {e}"))?;
 
-    if output.status.success() {
-        let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !token.is_empty() {
-            return Some(token);
-        }
-    }
-    None
+    parse_security_find_output(output.status.code(), &output.stdout, &output.stderr)
 }
 
 /// Writes or updates the generic password in macOS Keychain for service="gemini", account="antigravity".
@@ -153,6 +184,95 @@ pub fn delete_system_keychain_token() -> Result<(), String> {
     }
 }
 
+pub trait KeychainBackend: Send + Sync {
+    fn read_token(&self) -> Result<Option<String>, String>;
+    fn write_token(&self, token: &str) -> Result<(), String>;
+    fn delete_token(&self) -> Result<(), String>;
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct SystemKeychainBackend;
+
+impl KeychainBackend for SystemKeychainBackend {
+    fn read_token(&self) -> Result<Option<String>, String> {
+        read_system_keychain_token()
+    }
+
+    fn write_token(&self, token: &str) -> Result<(), String> {
+        write_system_keychain_token(token)
+    }
+
+    fn delete_token(&self) -> Result<(), String> {
+        delete_system_keychain_token()
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Default, Clone)]
+pub struct MockKeychainBackend {
+    pub token: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    pub calls: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    pub fail_read: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub fail_write: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub fail_delete: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub read_error_message: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+}
+
+#[cfg(test)]
+impl MockKeychainBackend {
+    pub fn new(initial_token: Option<String>) -> Self {
+        Self {
+            token: std::sync::Arc::new(std::sync::Mutex::new(initial_token)),
+            calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            fail_read: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            fail_write: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            fail_delete: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            read_error_message: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+}
+
+#[cfg(test)]
+impl KeychainBackend for MockKeychainBackend {
+    fn read_token(&self) -> Result<Option<String>, String> {
+        if let Ok(mut c) = self.calls.lock() {
+            c.push("read".to_string());
+        }
+        if self.fail_read.load(std::sync::atomic::Ordering::SeqCst) {
+            let msg = self
+                .read_error_message
+                .lock()
+                .ok()
+                .and_then(|m| m.clone())
+                .unwrap_or_else(|| "Mock read error (keychain locked)".to_string());
+            return Err(msg);
+        }
+        Ok(self.token.lock().unwrap().clone())
+    }
+
+    fn write_token(&self, token: &str) -> Result<(), String> {
+        if let Ok(mut c) = self.calls.lock() {
+            c.push(format!("write:{token}"));
+        }
+        if self.fail_write.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("Mock write error (keychain write failed)".to_string());
+        }
+        *self.token.lock().unwrap() = Some(token.to_string());
+        Ok(())
+    }
+
+    fn delete_token(&self) -> Result<(), String> {
+        if let Ok(mut c) = self.calls.lock() {
+            c.push("delete".to_string());
+        }
+        if self.fail_delete.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("Mock delete error".to_string());
+        }
+        *self.token.lock().unwrap() = None;
+        Ok(())
+    }
+}
+
 /// Saves the given token string into the profile directory under keychain_token.json.
 pub fn save_token_to_profile(profile_dir: &Path, token: &str) -> io::Result<Option<String>> {
     crate::security::secure_dir(profile_dir)?;
@@ -189,23 +309,36 @@ pub fn activate_profile_token(profile_dir: &Path) -> Result<(), String> {
 
 /// RAII Guard that activates a target profile's credentials into macOS Keychain,
 /// captures any token refresh on exit, and restores the original Keychain state.
-pub struct KeychainGuard {
+pub struct KeychainGuard<B: KeychainBackend = SystemKeychainBackend> {
+    backend: B,
     saved_system_token: Option<String>,
     target_profile_dir: Option<PathBuf>,
 }
 
-impl KeychainGuard {
+impl KeychainGuard<SystemKeychainBackend> {
     pub fn new(target_profile_dir: &Path) -> Result<Self, String> {
+        Self::new_with_backend(target_profile_dir, SystemKeychainBackend)
+    }
+}
+
+impl<B: KeychainBackend> KeychainGuard<B> {
+    pub fn new_with_backend(target_profile_dir: &Path, backend: B) -> Result<Self, String> {
         let profile_token = load_token_from_profile(target_profile_dir).ok_or_else(|| {
             format!(
                 "No saved Keychain token in profile directory {}",
                 target_profile_dir.display()
             )
         })?;
-        let current_system_token = read_system_keychain_token();
-        write_system_keychain_token(&profile_token)?;
+
+        // Tri-state result: any error aborts before activation
+        let current_system_token = backend
+            .read_token()
+            .map_err(|e| format!("Failed to snapshot Keychain before activation: {e}"))?;
+
+        backend.write_token(&profile_token)?;
 
         Ok(Self {
+            backend,
             saved_system_token: current_system_token,
             target_profile_dir: Some(target_profile_dir.to_path_buf()),
         })
@@ -221,16 +354,19 @@ impl KeychainGuard {
             return Ok(());
         };
 
-        let persist_result = match read_system_keychain_token() {
-            Some(active_token) => save_token_to_profile(&target_dir, &active_token)
+        let persist_result = match self.backend.read_token() {
+            Ok(Some(active_token)) => save_token_to_profile(&target_dir, &active_token)
                 .map(|_| ())
                 .map_err(|e| format!("Failed to persist refreshed profile token: {e}")),
-            None => Err("AGY removed or failed to expose the active Keychain token".to_string()),
+            Ok(None) => {
+                Err("AGY removed or failed to expose the active Keychain token".to_string())
+            }
+            Err(e) => Err(format!("Failed to read active Keychain token on sync: {e}")),
         };
 
         let restore_result = match self.saved_system_token.take() {
-            Some(prev) => write_system_keychain_token(&prev),
-            None => delete_system_keychain_token(),
+            Some(prev) => self.backend.write_token(&prev),
+            None => self.backend.delete_token(),
         };
 
         match (persist_result, restore_result) {
@@ -246,7 +382,7 @@ impl KeychainGuard {
     }
 }
 
-impl Drop for KeychainGuard {
+impl<B: KeychainBackend> Drop for KeychainGuard<B> {
     fn drop(&mut self) {
         if let Err(error) = self.cleanup() {
             eprintln!("Warning: failed to restore Keychain state: {error}");

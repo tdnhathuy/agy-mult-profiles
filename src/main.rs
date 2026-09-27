@@ -72,6 +72,31 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Run an autonomous task on an isolated Git worktree
+    #[command(version)]
+    Task {
+        /// Name of the profile (mandatory, explicit)
+        #[arg(long)]
+        profile: String,
+        /// Path to the isolated Git linked worktree
+        #[arg(long)]
+        worktree: std::path::PathBuf,
+        /// Path to prompt file (reads from stdin if omitted)
+        #[arg(long)]
+        prompt_file: Option<std::path::PathBuf>,
+        /// Timeout duration (e.g. 20m, 30s, 1h; default: 20m)
+        #[arg(long)]
+        timeout: Option<String>,
+        /// Model override for agy (e.g. gemini-2.5-flash)
+        #[arg(long)]
+        model: Option<String>,
+        /// Auto-approve AGY tool permissions (valid only with worktree)
+        #[arg(long)]
+        skip_permissions: bool,
+        /// Output result in JSON format
+        #[arg(long)]
+        json: bool,
+    },
     /// Execute arbitrary agy commands under a profile
     Exec {
         /// Profile name or alias
@@ -107,8 +132,105 @@ enum AliasCommands {
     },
 }
 
+fn handle_task_arg_error(args: &[String], err: &clap::Error) -> ! {
+    let mut profile = String::new();
+    let mut worktree = String::new();
+    let mut timeout_err = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--profile" && i + 1 < args.len() {
+            profile = args[i + 1].clone();
+            i += 1;
+        } else if let Some(p) = args[i].strip_prefix("--profile=") {
+            profile = p.to_string();
+        } else if args[i] == "--worktree" && i + 1 < args.len() {
+            worktree = args[i + 1].clone();
+            i += 1;
+        } else if let Some(w) = args[i].strip_prefix("--worktree=") {
+            worktree = w.to_string();
+        } else if args[i] == "--timeout" && i + 1 < args.len() {
+            let t = &args[i + 1];
+            if crate::commands::task::parse_duration(t).is_err() {
+                timeout_err = true;
+            }
+            i += 1;
+        } else if let Some(t) = args[i].strip_prefix("--timeout=") {
+            if crate::commands::task::parse_duration(t).is_err() {
+                timeout_err = true;
+            }
+        }
+        i += 1;
+    }
+
+    let failure_kind = if timeout_err {
+        crate::commands::task::TaskFailureKind::InvalidDuration
+    } else if profile.is_empty() {
+        crate::commands::task::TaskFailureKind::InvalidProfile
+    } else if worktree.is_empty() {
+        crate::commands::task::TaskFailureKind::InvalidWorktree
+    } else {
+        crate::commands::task::TaskFailureKind::SetupError
+    };
+
+    let err_str = err.to_string();
+    let json_out = crate::commands::task::TaskJsonOutput {
+        profile,
+        worktree,
+        canonical_worktree: None,
+        status: "error".to_string(),
+        failure_kind: Some(failure_kind.as_str().to_string()),
+        agent_failure_kind: None,
+        restore_error: None,
+        exit_code: None,
+        agent_exit_code: None,
+        cli_exit_code: 1,
+        timed_out: false,
+        duration_ms: 0,
+        stdout: String::new(),
+        stderr: err_str,
+    };
+
+    println!("{}", serde_json::to_string_pretty(&json_out).unwrap());
+    std::process::exit(1);
+}
+
+fn get_first_subcommand(raw_args: &[String]) -> Option<&str> {
+    let mut i = 1;
+    while i < raw_args.len() {
+        let arg = &raw_args[i];
+        if arg == "--" {
+            return raw_args.get(i + 1).map(|s| s.as_str());
+        }
+        if !arg.starts_with('-') {
+            return Some(arg.as_str());
+        }
+        i += 1;
+    }
+    None
+}
+
 fn main() {
-    let cli = Cli::parse();
+    let raw_args: Vec<String> = std::env::args().collect();
+    let cli = match Cli::try_parse_from(&raw_args) {
+        Ok(c) => c,
+        Err(err) => {
+            // Finding 5: Preserve normal Clap success semantics for --help and --version
+            if err.kind() == clap::error::ErrorKind::DisplayHelp
+                || err.kind() == clap::error::ErrorKind::DisplayVersion
+            {
+                err.exit();
+            }
+
+            // Finding 5: Identify actual first subcommand only. Do not intercept prompt ... task ... --json
+            let is_task_subcommand = get_first_subcommand(&raw_args) == Some("task");
+            if is_task_subcommand && raw_args.iter().any(|a| a == "--json") {
+                handle_task_arg_error(&raw_args, &err);
+            } else {
+                err.exit();
+            }
+        }
+    };
     let res = match &cli.command {
         Some(Commands::Login {
             name,
@@ -137,6 +259,23 @@ fn main() {
             prompt.as_deref(),
             model.as_deref(),
             add_dir,
+            *skip_permissions,
+            *json,
+        ),
+        Some(Commands::Task {
+            profile,
+            worktree,
+            prompt_file,
+            timeout,
+            model,
+            skip_permissions,
+            json,
+        }) => commands::task::cmd_task(
+            profile,
+            worktree,
+            prompt_file.as_deref(),
+            timeout.as_deref(),
+            model.as_deref(),
             *skip_permissions,
             *json,
         ),

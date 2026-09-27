@@ -104,50 +104,194 @@ pub fn build_agy_command(profile_dir: &Path, extra_args: &[String]) -> Result<Co
 }
 
 pub struct CapturedOutput {
-    pub status: ExitStatus,
+    pub status: Option<ExitStatus>,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+    pub timed_out: bool,
+}
+
+fn bounded_drain_readers(
+    stdout_done: &std::sync::atomic::AtomicBool,
+    stderr_done: &std::sync::atomic::AtomicBool,
+    mut stdout_handle: Option<thread::JoinHandle<()>>,
+    mut stderr_handle: Option<thread::JoinHandle<()>>,
+    drain_limit: Duration,
+) {
+    let start = std::time::Instant::now();
+    while start.elapsed() < drain_limit {
+        let out_f = stdout_done.load(std::sync::atomic::Ordering::SeqCst);
+        let err_f = stderr_done.load(std::sync::atomic::Ordering::SeqCst);
+        if out_f && err_f {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    // Only join threads that have confirmed completion!
+    // Never do an unbounded join on a thread that may be blocked in read().
+    if stdout_done.load(std::sync::atomic::Ordering::SeqCst) {
+        if let Some(h) = stdout_handle.take() {
+            let _ = h.join();
+        }
+    }
+    if stderr_done.load(std::sync::atomic::Ordering::SeqCst) {
+        if let Some(h) = stderr_handle.take() {
+            let _ = h.join();
+        }
+    }
+    // Any uncompleted handles are dropped here, detaching the thread safely.
 }
 
 pub fn run_command_captured_interruptibly(cmd: &mut Command) -> Result<CapturedOutput, String> {
+    run_command_captured_interruptibly_with_timeout(cmd, None)
+}
+
+pub fn run_command_captured_interruptibly_with_timeout(
+    cmd: &mut Command,
+    timeout: Option<Duration>,
+) -> Result<CapturedOutput, String> {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("Failed to execute agy: {e}"))?;
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
-    let status = loop {
+    let stdout_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let stderr_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    let stdout_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stderr_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let out_clone = std::sync::Arc::clone(&stdout_buf);
+    let out_done_clone = std::sync::Arc::clone(&stdout_done);
+    let stdout_handle = thread::spawn(move || {
+        if let Some(mut r) = stdout {
+            let mut chunk = [0u8; 8192];
+            loop {
+                match std::io::Read::read(&mut r, &mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if let Ok(mut lock) = out_clone.lock() {
+                            lock.extend_from_slice(&chunk[..n]);
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                }
+            }
+        }
+        out_done_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+
+    let err_clone = std::sync::Arc::clone(&stderr_buf);
+    let err_done_clone = std::sync::Arc::clone(&stderr_done);
+    let stderr_handle = thread::spawn(move || {
+        if let Some(mut r) = stderr {
+            let mut chunk = [0u8; 8192];
+            loop {
+                match std::io::Read::read(&mut r, &mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if let Ok(mut lock) = err_clone.lock() {
+                            lock.extend_from_slice(&chunk[..n]);
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break,
+                }
+            }
+        }
+        err_done_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+
+    let mut stdout_handle = Some(stdout_handle);
+    let mut stderr_handle = Some(stderr_handle);
+
+    let start_time = std::time::Instant::now();
+    let mut timed_out = false;
+    let mut exit_status: Option<ExitStatus> = None;
+    let child_pid = child.id();
+
+    const TERMINATION_DRAIN_LIMIT: Duration = Duration::from_millis(100);
+
+    loop {
         if crate::security::ProcessLock::interrupted() {
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(-(child_pid as libc::pid_t), libc::SIGKILL);
+            }
             let _ = child.kill();
             let _ = child.wait();
+            bounded_drain_readers(
+                &stdout_done,
+                &stderr_done,
+                stdout_handle.take(),
+                stderr_handle.take(),
+                TERMINATION_DRAIN_LIMIT,
+            );
             return Err("Interrupted while AGY was running; credentials were restored".to_string());
         }
-        match child
-            .try_wait()
-            .map_err(|e| format!("Failed to wait for agy: {e}"))?
-        {
-            Some(status) => break status,
-            None => thread::sleep(Duration::from_millis(100)),
-        }
-    };
 
-    let mut stdout_bytes = Vec::new();
-    let mut stderr_bytes = Vec::new();
-    if let Some(mut pipe) = stdout {
-        std::io::Read::read_to_end(&mut pipe, &mut stdout_bytes)
-            .map_err(|e| format!("Failed to collect agy stdout: {e}"))?;
+        if let Some(limit) = timeout {
+            if start_time.elapsed() >= limit {
+                timed_out = true;
+                #[cfg(unix)]
+                unsafe {
+                    libc::kill(-(child_pid as libc::pid_t), libc::SIGKILL);
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+                bounded_drain_readers(
+                    &stdout_done,
+                    &stderr_done,
+                    stdout_handle.take(),
+                    stderr_handle.take(),
+                    TERMINATION_DRAIN_LIMIT,
+                );
+                break;
+            }
+        }
+
+        if exit_status.is_none() {
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|e| format!("Failed to wait for agy: {e}"))?
+            {
+                exit_status = Some(status);
+            }
+        }
+
+        let stdout_finished = stdout_done.load(std::sync::atomic::Ordering::SeqCst);
+        let stderr_finished = stderr_done.load(std::sync::atomic::Ordering::SeqCst);
+
+        if exit_status.is_some() && stdout_finished && stderr_finished {
+            if let Some(h) = stdout_handle.take() {
+                let _ = h.join();
+            }
+            if let Some(h) = stderr_handle.take() {
+                let _ = h.join();
+            }
+            break;
+        }
+
+        thread::sleep(Duration::from_millis(20));
     }
-    if let Some(mut pipe) = stderr {
-        std::io::Read::read_to_end(&mut pipe, &mut stderr_bytes)
-            .map_err(|e| format!("Failed to collect agy stderr: {e}"))?;
-    }
+
+    let stdout_bytes = stdout_buf.lock().map(|b| b.clone()).unwrap_or_default();
+    let stderr_bytes = stderr_buf.lock().map(|b| b.clone()).unwrap_or_default();
+
     Ok(CapturedOutput {
-        status,
+        status: exit_status,
         stdout: stdout_bytes,
         stderr: stderr_bytes,
+        timed_out,
     })
 }
 

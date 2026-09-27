@@ -18,34 +18,56 @@ Use `agyp` to execute AGY prompts through one explicitly selected Google account
 1. List available profiles and linked emails:
    agyp list --json
 
-2. Run a non-interactive prompt on a profile or alias:
+2. Run a delegated coding task (RECOMMENDED):
+   agyp task --profile <profile> --worktree <linked-worktree-path> --prompt-file <path> [--timeout 20m] [--skip-permissions] [--json]
+   Example:
+   agyp task --profile p1 --worktree /path/to/worktree --prompt-file prompt.txt --json
+   Returns:
+   {
+     "profile": "p1",
+     "worktree": "/path/to/worktree",
+     "canonical_worktree": "/path/to/worktree",
+     "status": "success",
+     "failure_kind": null,
+     "agent_failure_kind": null,
+     "restore_error": null,
+     "agent_exit_code": 0,
+     "cli_exit_code": 0,
+     "exit_code": 0,
+     "timed_out": false,
+     "duration_ms": 12450,
+     "stdout": "...",
+     "stderr": ""
+   }
+
+3. Run a non-interactive prompt on a profile or alias:
    agyp prompt <profile_or_alias> "<prompt_text>"
    Example:
    agyp prompt p1 "Summarize git diff"
 
-3. Specify model:
-   agyp prompt p1 --model gemini-2.5-flash "Analyze this logic"
+4. Specify model:
+   agyp task --profile p1 --worktree /path/to/worktree --model gemini-2.5-flash --prompt-file prompt.txt
 
-4. Pipe large inputs / files (omit the positional prompt so stdin is read):
-   { printf '%s\n\n' 'Find memory leaks:'; cat main.py; } | agyp prompt p2
+5. Pipe large inputs / files:
+   cat prompt.txt | agyp task --profile p1 --worktree /path/to/worktree --json
 
-5. Structured JSON Output:
-   agyp prompt p1 --json "Run tests"
-   Returns:
-   {
-     "profile": "p1",
-     "email": "user@gmail.com",
-     "status": "success",
-     "exit_code": 0,
-     "output": "...",
-     "error": null
-   }
-
-#### Error Handling:
-- Exit Code 0: Success.
-- Exit Code 1: Profile or alias not found / syntax error.
-- Exit Code 2: Profile is unauthenticated. Notify the user to run `agyp login <profile>` in an interactive terminal.
-- Exit Code 127: `agy` binary not found in PATH.
+#### Error Handling & Failure Kinds (`agyp task`):
+- `cli_exit_code`: 0 on success, nonzero on any CLI or task failure (1 for general/setup error, 2 for unauthenticated).
+- `agent_exit_code`: Direct exit code of child AGY process; null on timeout or pre-execution setup errors; preserved when post-execution Keychain restoration fails.
+- `exit_code`: Deprecated backward-compatible exit code, always serialized; null on timeout or pre-execution setup errors; restoration failure classified as `setup_error` preserves child exit code.
+- `restore_error`: Non-null string if Keychain restoration failed (takes precedence as `setup_error` / exit code 1).
+- `agent_failure_kind`: Preserves original child failure category if Keychain restoration fails simultaneously.
+- Failure categories (`failure_kind` in JSON):
+  - `empty_output`: Child exited 0 but produced empty stdout.
+  - `permission_denied`: Tool permissions were denied or rejected.
+  - `quota_exhausted`: HTTP 429 / RESOURCE_EXHAUSTED / quota limit hit.
+  - `timeout`: Overall task deadline or execution exceeded `--timeout`.
+  - `agent_failed`: AGY process crashed or returned nonzero error code.
+  - `invalid_worktree`: Directory is not a valid linked git worktree or forged gitdir.
+  - `unauthenticated`: Profile is missing required `keychain_token.json` (exit code 2).
+  - `setup_error`: Process lock acquisition, initialization, or Keychain restoration failure.
+  - `invalid_duration`: Malformed `--timeout` string.
+  - `invalid_prompt`: Empty prompt supplied.
 
 #### Rate Limiting Policy:
 If the selected profile encounters `RESOURCE_EXHAUSTED` / `429`, keep the same profile, inspect worktree state before any retry, and report the blocker. Never switch accounts automatically.

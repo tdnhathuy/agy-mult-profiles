@@ -198,7 +198,7 @@ pub fn cmd_prompt(
         };
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        let exit_code = output.status.code().unwrap_or(1);
+        let exit_code = output.status.and_then(|s| s.code()).unwrap_or(1);
 
         let restore_result = keychain_guard.sync_and_restore();
         let restore_ok = restore_result.is_ok();

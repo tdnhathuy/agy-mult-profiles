@@ -44,7 +44,7 @@ pub fn cmd_login(name: &str, import_current: bool) -> Result<(), i32> {
         }
 
         // 1. Try importing token from system Keychain
-        if let Some(token) = crate::keychain::read_system_keychain_token() {
+        if let Ok(Some(token)) = crate::keychain::read_system_keychain_token() {
             let _ = crate::keychain::save_token_to_profile(&profile_dir, &token);
         }
 
@@ -78,7 +78,13 @@ pub fn cmd_login(name: &str, import_current: bool) -> Result<(), i32> {
     } else {
         // Fresh interactive login for a new account:
         // 1. Back up the exact Keychain state and restore it after login.
-        let prev_keychain_token = crate::keychain::read_system_keychain_token();
+        let prev_keychain_token = match crate::keychain::read_system_keychain_token() {
+            Ok(tok) => tok,
+            Err(e) => {
+                eprintln!("Error checking Keychain before login: {e}");
+                return Err(1);
+            }
+        };
 
         // 2. Remove the existing token so AGY cannot silently reuse the old account.
         let _ = crate::keychain::delete_system_keychain_token();
@@ -106,10 +112,13 @@ pub fn cmd_login(name: &str, import_current: bool) -> Result<(), i32> {
         let status_res = crate::agy::run_command_interruptibly(&mut login_cmd);
 
         let persist_result = match crate::keychain::read_system_keychain_token() {
-            Some(token) => crate::keychain::save_token_to_profile(&profile_dir, &token)
+            Ok(Some(token)) => crate::keychain::save_token_to_profile(&profile_dir, &token)
                 .map(|_| ())
                 .map_err(|e| format!("Failed to save profile credential: {e}")),
-            None => Err("Login was cancelled or failed to authenticate with Google.".to_string()),
+            Ok(None) => {
+                Err("Login was cancelled or failed to authenticate with Google.".to_string())
+            }
+            Err(e) => Err(format!("Failed to read Keychain token after login: {e}")),
         };
         let restore_result = match prev_keychain_token {
             Some(prev) => crate::keychain::write_system_keychain_token(&prev),

@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
+use std::thread;
+use std::time::Duration;
+
 use fs2::FileExt;
 
 static INTERRUPTED: AtomicBool = AtomicBool::new(false);
@@ -87,6 +90,54 @@ impl ProcessLock {
             .map_err(|e| format!("Failed to secure process lock: {e}"))?;
         file.lock_exclusive()
             .map_err(|e| format!("Failed to acquire process lock: {e}"))?;
+        Ok(Self {
+            file,
+            _signals: SignalGuard::install()?,
+        })
+    }
+
+    pub fn acquire_with_timeout(path: &Path, timeout: Duration) -> Result<Self, String> {
+        if let Some(parent) = path.parent() {
+            secure_dir(parent).map_err(|e| format!("Failed to secure lock directory: {e}"))?;
+        }
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|e| format!("Failed to open process lock: {e}"))?;
+        set_private_file_permissions(path)
+            .map_err(|e| format!("Failed to secure process lock: {e}"))?;
+
+        let start = std::time::Instant::now();
+        loop {
+            if Self::interrupted() {
+                return Err("Interrupted while waiting for process lock".to_string());
+            }
+
+            match file.try_lock_exclusive() {
+                Ok(()) => break,
+                Err(err) => {
+                    let would_block = err.kind() == io::ErrorKind::WouldBlock
+                        || err.raw_os_error() == Some(libc::EWOULDBLOCK)
+                        || err.raw_os_error() == Some(libc::EAGAIN);
+                    if !would_block {
+                        return Err(format!("Failed to acquire process lock: {err}"));
+                    }
+                }
+            }
+
+            if start.elapsed() >= timeout {
+                return Err(format!(
+                    "Timed out waiting for process lock after {:?}",
+                    timeout
+                ));
+            }
+
+            thread::sleep(Duration::from_millis(25));
+        }
+
         Ok(Self {
             file,
             _signals: SignalGuard::install()?,

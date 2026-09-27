@@ -117,17 +117,16 @@ Use `agyp` whenever you need to execute prompts or tasks via Google Antigravity 
 Rules for Hermes:
 1. To see available profiles and their statuses:
    `agyp list --json`
-2. To prompt a specific profile/account:
-   `agyp prompt <profile_or_alias> "<instruction>"`
-   Example:
-   `agyp prompt p1 "Write a python script to parse CSV"`
-3. To pipe context or large files:
-   `cat file.py | agyp prompt p2 "Analyze bugs in this code"`
-4. To receive machine-parseable JSON response:
-   `agyp prompt p1 --json "Check status"`
-5. If a command returns exit code 2 (unauthenticated):
+2. For coding tasks, ALWAYS use `agyp task` in an isolated Git linked worktree:
+   `agyp task --profile <profile> --worktree <worktree-path> --prompt-file <path> --timeout <duration> --json`
+   Or pipe prompt via stdin:
+   `cat prompt.txt | agyp task --profile <profile> --worktree <worktree-path> --timeout <duration> --json`
+   `agyp task` strictly isolates credentials, validates the linked worktree, drains streams concurrently to avoid deadlocks, enforces execution deadlines, and produces structured JSON output.
+3. Use `agyp prompt <profile> "<instruction>"` ONLY for non-coding or basic interactive use.
+   Do NOT use `agyp prompt` for coding delegation: it lacks linked-worktree isolation, stream deadlocking protections, deadline timeouts, and structured failure classification.
+4. If a command returns exit code 2 (unauthenticated):
    Notify the user to run `agyp login <profile>` in an interactive terminal.
-6. Rate Limit Handling:
+5. Rate Limit Handling:
    If the selected profile encounters Resource Exhausted / 429, keep it pinned, inspect worktree state before any retry, and report the blocker. Never switch profiles automatically.
 ```
 
@@ -137,11 +136,12 @@ Rules for Hermes:
 
 | Lệnh | Mô tả |
 | :--- | :--- |
+| `agyp task --profile <p> --worktree <path>` | Chạy task tự động trong Git linked worktree với stream draining, timeout & JSON classification |
 | `agyp login <name>` | Đăng nhập tài khoản mới qua trình duyệt OAuth |
 | `agyp login <name> --import-current` | Import phiên đăng nhập hiện tại từ macOS Keychain |
 | `agyp list` / `agyp list --json` | Liệt kê các profile, email và alias |
 | `agyp default [name]` | Xem hoặc đổi profile mặc định |
-| `agyp prompt <profile> "<text>"` | Gửi prompt đến profile (tự động bypass permission) |
+| `agyp prompt <profile> "<text>"` | Gửi prompt đến profile |
 | `agyp prompt <profile> --json "<text>"` | Nhận kết quả dạng JSON có cấu trúc |
 | `agyp prompt <profile> --model <model>` | Chọn model (`gemini-2.5-flash`,...) |
 | `agyp alias set <alias> <profile>` | Gán alias cho profile |
@@ -155,7 +155,7 @@ Rules for Hermes:
 ## 🔒 Security & Credential Isolation
 
 - Mỗi profile lưu token riêng tại `~/.gemini-profiles/profiles/<name>/keychain_token.json`.
-- Khi thực thi lệnh (`prompt` / `exec`), `agyp` dùng cơ chế **RAII `KeychainGuard`**:
+- Khi thực thi lệnh (`task` / `prompt` / `exec`), `agyp` dùng cơ chế **RAII `KeychainGuard`**:
   1. Tạm swap token của profile đó vào macOS Keychain.
   2. Khởi chạy `agy`.
   3. Bắt bất kỳ token refresh nào ghi lại vào file của profile.

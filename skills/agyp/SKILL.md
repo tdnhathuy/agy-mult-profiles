@@ -29,6 +29,30 @@ Use `agyp` to delegate implementation to AGY while Hermes/SOL owns planning, rev
 
 ## Invocation
 
+### Recommended: `agyp task` (Production-Hardened Task Delegation)
+
+For agentic delegation, **always prefer `agyp task`**. It strictly validates that `--worktree` is an isolated linked Git worktree, sets AGY's working directory, drains stdout/stderr concurrently to avoid OS pipe deadlocks, enforces timeouts, and classifies outcomes into machine-readable JSON:
+
+```bash
+agyp task --profile <selected-profile> --worktree <absolute-worktree-path> --prompt-file <prompt-path> [--timeout 20m] [--model <model>] [--skip-permissions] [--json]
+```
+
+Or pass prompts via stdin:
+
+```bash
+printf '%s\n' '<scoped task>' | agyp task --profile <selected-profile> --worktree <absolute-worktree-path> --json
+```
+
+Key features of `agyp task`:
+- **Explicit Profile**: `--profile` is mandatory; never falls back to defaults or rotates accounts.
+- **Linked Worktree Validation**: Rejects canonical/main checkouts, non-worktree dirs, subdirectories, and symlinks.
+- **Concurrent Stream Draining**: Reader threads drain stdout and stderr immediately from process start so large outputs cannot deadlock the OS pipe.
+- **Success Gate**: Requires child exit 0, trimmed stdout non-empty, and absence of permission denial or quota exhaustion markers.
+- **Classified Failure Outcomes**: JSON includes `status`, `failure_kind`, `agent_failure_kind` (when restoration fails after child error), `restore_error` (Keychain restoration failure error), `agent_exit_code` (child process status), `cli_exit_code` (nonzero on all failures), backward-compatible `exit_code`, `timed_out`, `duration_ms`, `stdout`, and `stderr`.
+- **Keychain Safety**: Restores the original Keychain state on all paths (success, error, timeout, interrupt). Restoration failure takes precedence and fails the command with exit code 1 (`setup_error`).
+
+### Legacy / Quick Prompt: `agyp prompt`
+
 Run AGY with the isolated worktree as the terminal tool's `workdir`:
 
 ```bash
@@ -49,7 +73,7 @@ For stdin input, omit the positional prompt:
 { printf '%s\n\n' '<instruction>'; cat <file>; } | agyp prompt <selected-profile>
 ```
 
-Use `agyp exec <selected-profile> -- <agy-args>` only for AGY flags unsupported by `prompt`. Do not use `--continue` unless the conversation belongs to this exact task.
+Use `agyp exec <selected-profile> -- <agy-args>` only for AGY flags unsupported by `prompt` or `task`. Do not use `--continue` unless the conversation belongs to this exact task.
 
 ## Delegation Contract
 
