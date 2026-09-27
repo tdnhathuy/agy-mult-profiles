@@ -176,6 +176,16 @@ pub fn sanitize_detail(msg: &str) -> String {
         return String::new();
     }
 
+    if trimmed == "Probe completed successfully"
+        || trimmed == "Probe completed without expected output"
+        || trimmed == "Authentication failed"
+        || trimmed == "Rate limit or quota exhausted (429 / RESOURCE_EXHAUSTED)"
+        || trimmed == "Probe terminated by signal or failed to execute"
+        || trimmed.starts_with("Probe exited with unrecognized status code ")
+    {
+        return trimmed.to_string();
+    }
+
     // Quota output is deliberately enum-like. Never forward arbitrary backend,
     // filesystem, process, or Keychain text: it may contain credentials in a
     // representation that a heuristic redactor does not recognize.

@@ -162,6 +162,18 @@ fn test_cli_quota_missing_profile_value_json_schema() {
 }
 
 #[test]
+fn test_sanitize_detail_preserves_known_probe_outcomes() {
+    assert_eq!(
+        commands::quota::sanitize_detail("Probe completed successfully"),
+        "Probe completed successfully"
+    );
+    assert_eq!(
+        commands::quota::sanitize_detail("Probe completed without expected output"),
+        "Probe completed without expected output"
+    );
+}
+
+#[test]
 fn test_cli_quota_exclusivity_missing_args() {
     let bin = env!("CARGO_BIN_EXE_agyp");
 
