@@ -6,6 +6,8 @@ mod agy;
 mod commands;
 #[path = "../src/config.rs"]
 mod config;
+#[path = "../src/keychain.rs"]
+mod keychain;
 
 use agy::build_agy_command;
 
@@ -52,7 +54,12 @@ fn test_cmd_exec_nonexistent_profile_fails() {
 fn test_cmd_prompt_missing_profile_json_output() {
     let bin = env!("CARGO_BIN_EXE_agyp");
     let output = std::process::Command::new(bin)
-        .args(["prompt", "__nonexistent_profile_xyz__", "test prompt", "--json"])
+        .args([
+            "prompt",
+            "__nonexistent_profile_xyz__",
+            "test prompt",
+            "--json",
+        ])
         .output()
         .unwrap();
 

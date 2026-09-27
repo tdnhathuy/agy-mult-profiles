@@ -20,6 +20,14 @@ pub fn cmd_exec(profile_arg: &str, raw_args: &[String]) -> Result<(), i32> {
         127
     })?;
 
+    let _keychain_guard = crate::keychain::KeychainGuard::new(&profile.dir).map_err(|e| {
+        eprintln!(
+            "Failed to configure keychain for profile '{}': {}",
+            profile.name, e
+        );
+        1
+    })?;
+
     let status = cmd.status().map_err(|e| {
         eprintln!("Failed to run agy: {}", e);
         1

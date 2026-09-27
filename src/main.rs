@@ -1,6 +1,7 @@
 mod agy;
 mod commands;
 mod config;
+pub mod keychain;
 
 use clap::{Parser, Subcommand};
 

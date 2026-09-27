@@ -136,6 +136,8 @@ fn test_atomic_persistence_cleans_up_tmp() {
     reg.save(&config_path).unwrap();
 
     assert!(config_path.exists());
-    let tmp_path = dir.path().join(format!("profiles.json.tmp.{}", std::process::id()));
+    let tmp_path = dir
+        .path()
+        .join(format!("profiles.json.tmp.{}", std::process::id()));
     assert!(!tmp_path.exists(), "Temp file should be renamed/removed");
 }

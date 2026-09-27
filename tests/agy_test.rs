@@ -3,6 +3,8 @@ use tempfile::tempdir;
 
 #[path = "../src/agy.rs"]
 mod agy;
+#[path = "../src/keychain.rs"]
+mod keychain;
 use agy::{build_agy_command, check_profile_auth, extract_profile_email, locate_agy_binary};
 
 #[test]

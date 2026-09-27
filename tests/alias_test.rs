@@ -6,6 +6,8 @@ mod agy;
 mod commands;
 #[path = "../src/config.rs"]
 mod config;
+#[path = "../src/keychain.rs"]
+mod keychain;
 
 use config::{ProfileInfo, ProfileRegistry};
 

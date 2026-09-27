@@ -85,7 +85,12 @@ pub fn cmd_prompt(
             profile.name, profile.name
         );
         if json_output {
-            print_json_error(&profile.name, profile_email_opt(&profile.email), 2, &err_msg);
+            print_json_error(
+                &profile.name,
+                profile_email_opt(&profile.email),
+                2,
+                &err_msg,
+            );
         } else {
             eprintln!("Error: {}", err_msg);
         }
@@ -143,12 +148,36 @@ pub fn cmd_prompt(
         }
     };
 
+    // Activate target profile credentials in macOS Keychain for agy execution
+    let _keychain_guard = crate::keychain::KeychainGuard::new(&profile.dir).map_err(|e| {
+        let err_msg = format!(
+            "Failed to configure keychain for profile '{}': {}",
+            profile.name, e
+        );
+        if json_output {
+            print_json_error(
+                &profile.name,
+                profile_email_opt(&profile.email),
+                1,
+                &err_msg,
+            );
+        } else {
+            eprintln!("Error: {}", err_msg);
+        }
+        1
+    })?;
+
     if json_output {
         let output = match cmd.output() {
             Ok(o) => o,
             Err(e) => {
                 let err_msg = format!("Failed to execute agy: {}", e);
-                print_json_error(&profile.name, profile_email_opt(&profile.email), 1, &err_msg);
+                print_json_error(
+                    &profile.name,
+                    profile_email_opt(&profile.email),
+                    1,
+                    &err_msg,
+                );
                 return Err(1);
             }
         };

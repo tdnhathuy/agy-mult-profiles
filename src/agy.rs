@@ -41,11 +41,43 @@ pub fn locate_agy_binary() -> Result<PathBuf, String> {
 }
 
 pub fn check_profile_auth(profile_dir: &Path) -> bool {
-    let creds_file = profile_dir.join("oauth_creds.json");
-    creds_file.is_file()
+    profile_dir.join("keychain_token.json").is_file()
+        || profile_dir.join("oauth_creds.json").is_file()
+        || profile_dir.join("jetski-standalone-oauth-token").is_file()
 }
 
 pub fn extract_profile_email(profile_dir: &Path) -> Option<String> {
+    // 1. Try keychain_token.json
+    let keychain_file = profile_dir.join("keychain_token.json");
+    if keychain_file.is_file() {
+        if let Ok(content) = fs::read_to_string(&keychain_file) {
+            if let Some(email) = crate::keychain::extract_email_from_token_string(&content) {
+                return Some(email);
+            }
+        }
+    }
+
+    // 2. Try jetski-standalone-oauth-token
+    let standalone_file = profile_dir.join("jetski-standalone-oauth-token");
+    if standalone_file.is_file() {
+        if let Ok(content) = fs::read_to_string(&standalone_file) {
+            if let Some(email) = crate::keychain::extract_email_from_token_string(&content) {
+                return Some(email);
+            }
+        }
+    }
+
+    // 3. Try oauth_creds.json
+    let creds_file = profile_dir.join("oauth_creds.json");
+    if creds_file.is_file() {
+        if let Ok(content) = fs::read_to_string(&creds_file) {
+            if let Some(email) = crate::keychain::extract_email_from_token_string(&content) {
+                return Some(email);
+            }
+        }
+    }
+
+    // 4. Try google_accounts.json
     let accounts_file = profile_dir.join("google_accounts.json");
     if accounts_file.is_file() {
         if let Ok(content) = fs::read_to_string(&accounts_file) {
