@@ -23,6 +23,13 @@ pub fn cmd_login(name: &str, import_current: bool) -> Result<(), i32> {
     })?;
 
     if import_current {
+        let creds_file = dirs::home_dir().map(|h| h.join(".gemini/oauth_creds.json"));
+        let creds_exist = creds_file.as_ref().map(|p| p.is_file()).unwrap_or(false);
+
+        if !creds_exist {
+            eprintln!("Warning: No active credentials found in ~/.gemini/oauth_creds.json. Please run 'agyp login <profile>' without --import-current to authenticate.");
+        }
+
         if let Some(home) = dirs::home_dir() {
             let default_gemini = home.join(".gemini");
             let files = ["oauth_creds.json", "google_accounts.json"];

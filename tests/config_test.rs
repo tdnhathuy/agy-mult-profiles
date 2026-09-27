@@ -127,3 +127,15 @@ fn test_paths_and_load_edge_cases() {
     std::fs::write(&invalid_json, "not valid json").unwrap();
     assert!(ProfileRegistry::load_or_default(&invalid_json).is_err());
 }
+
+#[test]
+fn test_atomic_persistence_cleans_up_tmp() {
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("profiles.json");
+    let reg = ProfileRegistry::default();
+    reg.save(&config_path).unwrap();
+
+    assert!(config_path.exists());
+    let tmp_path = dir.path().join(format!("profiles.json.tmp.{}", std::process::id()));
+    assert!(!tmp_path.exists(), "Temp file should be renamed/removed");
+}

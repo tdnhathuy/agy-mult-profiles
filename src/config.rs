@@ -36,6 +36,9 @@ impl Default for ProfileRegistry {
 
 impl ProfileRegistry {
     pub fn get_profiles_dir() -> PathBuf {
+        if let Ok(dir) = std::env::var("AGYP_PROFILES_DIR") {
+            return PathBuf::from(dir);
+        }
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
         home.join(".gemini-profiles")
     }
@@ -54,13 +57,43 @@ impl ProfileRegistry {
     }
 
     pub fn save(&self, path: &Path) -> Result<(), String> {
-        if let Some(parent) = path.parent() {
+        let parent = path.parent().unwrap_or_else(|| Path::new(""));
+        if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("Failed to create parent dir: {}", e))?;
         }
+
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("profiles.json");
+        let tmp_path = if parent.as_os_str().is_empty() {
+            PathBuf::from(format!("{}.tmp.{}", file_name, std::process::id()))
+        } else {
+            parent.join(format!("{}.tmp.{}", file_name, std::process::id()))
+        };
+
         let content = serde_json::to_string_pretty(self)
             .map_err(|e| format!("Serialization error: {}", e))?;
-        fs::write(path, content).map_err(|e| format!("Failed to write registry: {}", e))?;
+
+        let write_and_sync = || -> std::io::Result<()> {
+            use std::io::Write;
+            let mut file = fs::File::create(&tmp_path)?;
+            file.write_all(content.as_bytes())?;
+            file.sync_all()?;
+            Ok(())
+        };
+
+        if let Err(e) = write_and_sync() {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(format!("Failed to write temp registry file: {}", e));
+        }
+
+        if let Err(e) = fs::rename(&tmp_path, path) {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(format!("Failed to replace registry file: {}", e));
+        }
+
         Ok(())
     }
 
