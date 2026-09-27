@@ -1,0 +1,13 @@
+# Rust build artifacts
+/target
+**/*.rs.bk
+Cargo.lock.orig
+
+# macOS files
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Local Antigravity & superpowers files
+.superpowers/
+.gemini/
