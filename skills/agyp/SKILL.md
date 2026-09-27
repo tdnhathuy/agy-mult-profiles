@@ -1,6 +1,6 @@
 ---
 name: agyp
-version: 0.2.0
+version: 0.3.0
 description: "Use when delegating coding to AGY through one explicit Antigravity profile. Pins the profile, serializes credentials, isolates edits in a worktree, and leaves review/integration to Hermes."
 platforms: [macos]
 metadata:
@@ -21,13 +21,43 @@ Use `agyp` to delegate implementation to AGY while Hermes/SOL owns planning, rev
    command -v agy && agy --version
    agyp list --json
    ```
-2. Select one explicit authenticated profile from the list and pin it for the task.
-3. Never omit the profile, use implicit defaults, round-robin, or automatically switch after `429`.
-4. For coding, create or select an isolated Git worktree. Verify its branch and clean/known status before execution.
+2. Probe quota availability before selecting a profile:
+   ```bash
+   agyp quota --all --json
+   ```
+3. Select one explicit authenticated, available profile from the list and pin it for the task.
+4. Never omit the profile, use implicit defaults, round-robin, or automatically switch after `429`.
+5. For coding, create or select an isolated Git worktree. Verify its branch and clean/known status before execution.
 
 `agyp` serializes profile/Keychain activation across processes. Multiple callers may queue, but AGY profile sessions run one at a time under the shared macOS Keychain.
 
 ## Invocation
+
+### Quota Probing: `agyp quota`
+
+Probe per-profile quota status using the minimal, non-mutating probe:
+
+```bash
+agyp quota --profile <selected-profile> [--timeout 30s] [--no-cache] [--json]
+agyp quota --all [--timeout 30s] [--no-cache] [--json]
+```
+
+- **Contract**: Exactly one of `--profile <name>` or `--all` is required. Safely resolves aliases. `--all` evaluates registered profiles in stable alphabetical name order sequentially under a single process lock.
+- **Probe-Based Source**: AGY 1.2.12 has no official quota/usage API. Status reflects an observed fixed probe, a validated cache entry, or a preflight result. Top-level and per-result `source` values are `probe`, `cache`, `preflight`, or `mixed`. It does NOT report percentages, token limits, remaining requests, or reset times.
+- **Statuses**:
+  - `available`: Probe completed successfully with expected output.
+  - `quota_exhausted`: Genuine anchored 429 RESOURCE_EXHAUSTED or individual quota limit signal.
+  - `unauthenticated`: Missing stored credentials or genuine auth failure.
+  - `unknown`: Probe completed without establishing a recognized state.
+  - `error`: Timeout, process lock, local setup, or Keychain restoration failure.
+  - `unsupported`: Platform or configuration cannot run probe safely.
+- **Exit Codes**:
+  - `0`: All requested profiles are available (including valid cached available).
+  - `2`: Any profile is `quota_exhausted` or `unauthenticated` (and no errors/unknown/unsupported exist).
+  - `1`: Invalid args, timeout, unknown, error, unsupported, or Keychain restoration failure.
+- **Caching**: Results cached in `~/.gemini-profiles/quota-cache.json` with 5-minute TTL and mode 0600. Contains only sanitized metadata (no prompts, outputs, or credentials). Use `--no-cache` to force a fresh probe.
+- **Deadline**: `--timeout` is one overall command deadline covering lock acquisition and the sequential `--all` run; it is not a per-profile allowance. Once it expires, later profiles are not probed and Keychain restoration receives a separately bounded emergency cleanup attempt.
+- **Safety Policy**: Never retry a failed probe or automatically switch profiles when encountering quota limits. Keychain restoration failures stop `--all` immediately.
 
 ### Recommended: `agyp task` (Production-Hardened Task Delegation)
 

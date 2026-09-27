@@ -105,6 +105,24 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
+    /// Check quota status for profiles
+    Quota {
+        /// Name of the profile or alias
+        #[arg(long)]
+        profile: Option<String>,
+        /// Check all registered profiles
+        #[arg(long)]
+        all: bool,
+        /// Timeout duration (e.g. 30s, 1m; default: 30s)
+        #[arg(long)]
+        timeout: Option<String>,
+        /// Bypass cache and force fresh probe
+        #[arg(long)]
+        no_cache: bool,
+        /// Output result in JSON format
+        #[arg(long)]
+        json: bool,
+    },
     /// Show version or ping
     Ping,
 }
@@ -195,6 +213,44 @@ fn handle_task_arg_error(args: &[String], err: &clap::Error) -> ! {
     std::process::exit(1);
 }
 
+fn handle_quota_arg_error(args: &[String], err: &clap::Error) -> ! {
+    let mut profile = "unknown".to_string();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--profile" && i + 1 < args.len() && !args[i + 1].starts_with('-') {
+            profile = args[i + 1].clone();
+            i += 1;
+        } else if let Some(p) = args[i].strip_prefix("--profile=") {
+            if !p.is_empty() {
+                profile = p.to_string();
+            }
+        }
+        i += 1;
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let result = serde_json::json!({
+        "profile": profile,
+        "email": null,
+        "status": "error",
+        "observed_at": now,
+        "cached": false,
+        "source": "preflight",
+        "detail": err.to_string().trim(),
+        "agent_exit_code": null,
+    });
+    let json_out = serde_json::json!({
+        "schema_version": 1,
+        "checked_at": now,
+        "source": "preflight",
+        "results": [result],
+        "cli_exit_code": 1,
+    });
+
+    println!("{}", serde_json::to_string_pretty(&json_out).unwrap());
+    std::process::exit(1);
+}
+
 fn get_first_subcommand(raw_args: &[String]) -> Option<&str> {
     let mut i = 1;
     while i < raw_args.len() {
@@ -222,10 +278,13 @@ fn main() {
                 err.exit();
             }
 
-            // Finding 5: Identify actual first subcommand only. Do not intercept prompt ... task ... --json
-            let is_task_subcommand = get_first_subcommand(&raw_args) == Some("task");
+            let first_sub = get_first_subcommand(&raw_args);
+            let is_task_subcommand = first_sub == Some("task");
+            let is_quota_subcommand = first_sub == Some("quota");
             if is_task_subcommand && raw_args.iter().any(|a| a == "--json") {
                 handle_task_arg_error(&raw_args, &err);
+            } else if is_quota_subcommand && raw_args.iter().any(|a| a == "--json") {
+                handle_quota_arg_error(&raw_args, &err);
             } else {
                 err.exit();
             }
@@ -277,6 +336,19 @@ fn main() {
             timeout.as_deref(),
             model.as_deref(),
             *skip_permissions,
+            *json,
+        ),
+        Some(Commands::Quota {
+            profile,
+            all,
+            timeout,
+            no_cache,
+            json,
+        }) => commands::quota::cmd_quota(
+            profile.as_deref(),
+            *all,
+            timeout.as_deref(),
+            *no_cache,
             *json,
         ),
         Some(Commands::Exec { profile, args }) => commands::exec::cmd_exec(profile, args),

@@ -3,7 +3,9 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::{STANDARD, URL_SAFE};
 use base64::Engine;
@@ -111,31 +113,82 @@ pub fn parse_security_find_output(
     }
 }
 
+const KEYCHAIN_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+const KEYCHAIN_RESTORE_TIMEOUT: Duration = Duration::from_secs(5);
+
+fn run_security_command(args: &[&str], timeout: Duration) -> Result<Output, String> {
+    let mut child = Command::new("security")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to invoke security tool: {e}"))?;
+    let start = Instant::now();
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child
+                    .wait_with_output()
+                    .map_err(|e| format!("Failed to collect security tool output: {e}"));
+            }
+            Ok(None) if start.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("Keychain operation timed out".to_string());
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("Failed while waiting for security tool: {e}"));
+            }
+        }
+    }
+}
+
+fn duration_until(deadline: Instant) -> Result<Duration, String> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| "Keychain transaction deadline exceeded".to_string())
+}
+
 /// Reads the generic password token from macOS Keychain for service="gemini", account="antigravity".
 /// Returns a tri-state Result:
 /// - Ok(Some(token)) if present
 /// - Ok(None) if absent (errSecItemNotFound)
 /// - Err(...) on any command, locked, or permission error
-pub fn read_system_keychain_token() -> Result<Option<String>, String> {
-    let output = Command::new("security")
-        .args([
+pub fn read_system_keychain_token_with_timeout(
+    timeout: Duration,
+) -> Result<Option<String>, String> {
+    let output = run_security_command(
+        &[
             "find-generic-password",
             "-s",
             KEYCHAIN_SERVICE,
             "-a",
             KEYCHAIN_ACCOUNT,
             "-w",
-        ])
-        .output()
-        .map_err(|e| format!("Failed to invoke security tool: {e}"))?;
+        ],
+        timeout,
+    )?;
 
     parse_security_find_output(output.status.code(), &output.stdout, &output.stderr)
 }
 
+pub fn read_system_keychain_token() -> Result<Option<String>, String> {
+    read_system_keychain_token_with_timeout(KEYCHAIN_COMMAND_TIMEOUT)
+}
+
 /// Writes or updates the generic password in macOS Keychain for service="gemini", account="antigravity".
-pub fn write_system_keychain_token(token: &str) -> Result<(), String> {
-    let output = Command::new("security")
-        .args([
+pub fn write_system_keychain_token_with_timeout(
+    token: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    let output = run_security_command(
+        &[
             "add-generic-password",
             "-U",
             "-s",
@@ -144,9 +197,9 @@ pub fn write_system_keychain_token(token: &str) -> Result<(), String> {
             KEYCHAIN_ACCOUNT,
             "-w",
             token,
-        ])
-        .output()
-        .map_err(|e| format!("Failed to invoke security tool: {e}"))?;
+        ],
+        timeout,
+    )?;
 
     if output.status.success() {
         Ok(())
@@ -158,18 +211,22 @@ pub fn write_system_keychain_token(token: &str) -> Result<(), String> {
     }
 }
 
+pub fn write_system_keychain_token(token: &str) -> Result<(), String> {
+    write_system_keychain_token_with_timeout(token, KEYCHAIN_COMMAND_TIMEOUT)
+}
+
 /// Deletes the generic password from macOS Keychain for service="gemini", account="antigravity".
-pub fn delete_system_keychain_token() -> Result<(), String> {
-    let output = Command::new("security")
-        .args([
+pub fn delete_system_keychain_token_with_timeout(timeout: Duration) -> Result<(), String> {
+    let output = run_security_command(
+        &[
             "delete-generic-password",
             "-s",
             KEYCHAIN_SERVICE,
             "-a",
             KEYCHAIN_ACCOUNT,
-        ])
-        .output()
-        .map_err(|e| format!("Failed to invoke security tool: {}", e))?;
+        ],
+        timeout,
+    )?;
 
     // Even if it failed because item was not found, we treat as clean
     if output.status.success()
@@ -184,10 +241,29 @@ pub fn delete_system_keychain_token() -> Result<(), String> {
     }
 }
 
+pub fn delete_system_keychain_token() -> Result<(), String> {
+    delete_system_keychain_token_with_timeout(KEYCHAIN_COMMAND_TIMEOUT)
+}
+
 pub trait KeychainBackend: Send + Sync {
     fn read_token(&self) -> Result<Option<String>, String>;
     fn write_token(&self, token: &str) -> Result<(), String>;
     fn delete_token(&self) -> Result<(), String>;
+
+    fn read_token_until(&self, deadline: Instant) -> Result<Option<String>, String> {
+        let _ = duration_until(deadline)?;
+        self.read_token()
+    }
+
+    fn write_token_until(&self, token: &str, deadline: Instant) -> Result<(), String> {
+        let _ = duration_until(deadline)?;
+        self.write_token(token)
+    }
+
+    fn delete_token_until(&self, deadline: Instant) -> Result<(), String> {
+        let _ = duration_until(deadline)?;
+        self.delete_token()
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -204,6 +280,18 @@ impl KeychainBackend for SystemKeychainBackend {
 
     fn delete_token(&self) -> Result<(), String> {
         delete_system_keychain_token()
+    }
+
+    fn read_token_until(&self, deadline: Instant) -> Result<Option<String>, String> {
+        read_system_keychain_token_with_timeout(duration_until(deadline)?)
+    }
+
+    fn write_token_until(&self, token: &str, deadline: Instant) -> Result<(), String> {
+        write_system_keychain_token_with_timeout(token, duration_until(deadline)?)
+    }
+
+    fn delete_token_until(&self, deadline: Instant) -> Result<(), String> {
+        delete_system_keychain_token_with_timeout(duration_until(deadline)?)
     }
 }
 
@@ -313,6 +401,7 @@ pub struct KeychainGuard<B: KeychainBackend = SystemKeychainBackend> {
     backend: B,
     saved_system_token: Option<String>,
     target_profile_dir: Option<PathBuf>,
+    persistence_attempted: bool,
 }
 
 impl KeychainGuard<SystemKeychainBackend> {
@@ -322,7 +411,11 @@ impl KeychainGuard<SystemKeychainBackend> {
 }
 
 impl<B: KeychainBackend> KeychainGuard<B> {
-    pub fn new_with_backend(target_profile_dir: &Path, backend: B) -> Result<Self, String> {
+    pub fn new_with_backend_until(
+        target_profile_dir: &Path,
+        backend: B,
+        deadline: Instant,
+    ) -> Result<Self, String> {
         let profile_token = load_token_from_profile(target_profile_dir).ok_or_else(|| {
             format!(
                 "No saved Keychain token in profile directory {}",
@@ -330,54 +423,108 @@ impl<B: KeychainBackend> KeychainGuard<B> {
             )
         })?;
 
-        // Tri-state result: any error aborts before activation
         let current_system_token = backend
-            .read_token()
+            .read_token_until(deadline)
             .map_err(|e| format!("Failed to snapshot Keychain before activation: {e}"))?;
 
-        backend.write_token(&profile_token)?;
-
-        Ok(Self {
+        let mut guard = Self {
             backend,
             saved_system_token: current_system_token,
             target_profile_dir: Some(target_profile_dir.to_path_buf()),
-        })
+            persistence_attempted: false,
+        };
+
+        if let Err(activate_error) = guard.backend.write_token_until(&profile_token, deadline) {
+            // No AGY session ran, so cleanup must never persist whichever credential is visible
+            // after an uncertain activation. Any retry is restoration-only.
+            guard.persistence_attempted = true;
+            // The write may have reached Keychain before its process timed out or output
+            // collection failed. Restore from the snapshot under a separate bounded budget.
+            let restore_result =
+                guard.restore_snapshot_until(Instant::now() + KEYCHAIN_RESTORE_TIMEOUT);
+            if restore_result.is_ok() {
+                guard.target_profile_dir = None;
+            }
+            return match restore_result {
+                Ok(()) => Err(format!("Failed to activate profile Keychain token: {activate_error}")),
+                Err(restore_error) => Err(format!(
+                    "Failed to activate profile Keychain token: {activate_error}; also failed to restore prior Keychain state: {restore_error}"
+                )),
+            };
+        }
+
+        Ok(guard)
+    }
+
+    pub fn new_with_backend(target_profile_dir: &Path, backend: B) -> Result<Self, String> {
+        Self::new_with_backend_until(
+            target_profile_dir,
+            backend,
+            Instant::now() + KEYCHAIN_COMMAND_TIMEOUT,
+        )
+    }
+
+    pub fn sync_and_restore_until(mut self, deadline: Instant) -> Result<(), String> {
+        self.cleanup_until(Some(deadline))
     }
 
     /// Captures a refreshed token and restores the exact prior Keychain state.
     pub fn sync_and_restore(mut self) -> Result<(), String> {
-        self.cleanup()
+        self.cleanup_until(None)
     }
 
     fn cleanup(&mut self) -> Result<(), String> {
-        let Some(target_dir) = self.target_profile_dir.take() else {
+        self.cleanup_until(None)
+    }
+
+    fn cleanup_until(&mut self, deadline: Option<Instant>) -> Result<(), String> {
+        let Some(target_dir) = self.target_profile_dir.as_ref().cloned() else {
             return Ok(());
         };
 
-        let persist_result = match self.backend.read_token() {
-            Ok(Some(active_token)) => save_token_to_profile(&target_dir, &active_token)
-                .map(|_| ())
-                .map_err(|e| format!("Failed to persist refreshed profile token: {e}")),
-            Ok(None) => {
-                Err("AGY removed or failed to expose the active Keychain token".to_string())
+        let persist_result = if self.persistence_attempted {
+            Ok(())
+        } else {
+            self.persistence_attempted = true;
+            match deadline {
+                Some(deadline) => self.backend.read_token_until(deadline),
+                None => self.backend.read_token(),
             }
-            Err(e) => Err(format!("Failed to read active Keychain token on sync: {e}")),
+            .and_then(|active_token| {
+                active_token.ok_or_else(|| {
+                    "AGY removed or failed to expose the active Keychain token".to_string()
+                })
+            })
+            .and_then(|active_token| {
+                save_token_to_profile(&target_dir, &active_token)
+                    .map(|_| ())
+                    .map_err(|e| format!("Failed to persist refreshed profile token: {e}"))
+            })
         };
 
-        let restore_result = match self.saved_system_token.take() {
-            Some(prev) => self.backend.write_token(&prev),
-            None => self.backend.delete_token(),
-        };
+        // Restoration gets an independent bounded budget. A persistence read may consume the
+        // command deadline, but it must never prevent restoration of the exact snapshot.
+        let restore_result = self.restore_snapshot_until(Instant::now() + KEYCHAIN_RESTORE_TIMEOUT);
+        if restore_result.is_ok() {
+            self.target_profile_dir = None;
+        }
 
         match (persist_result, restore_result) {
             (Ok(()), Ok(())) => Ok(()),
-            (Err(persist), Ok(())) => Err(persist),
-            (Ok(()), Err(restore)) => {
-                Err(format!("Failed to restore prior Keychain state: {restore}"))
+            (Err(persist_error), Ok(())) => Err(persist_error),
+            (Ok(()), Err(restore_error)) => {
+                Err(format!("Failed to restore original Keychain state: {restore_error}"))
             }
-            (Err(persist), Err(restore)) => Err(format!(
-                "{persist}; also failed to restore prior Keychain state: {restore}"
+            (Err(persist_error), Err(restore_error)) => Err(format!(
+                "{persist_error}; additionally failed to restore original Keychain state: {restore_error}"
             )),
+        }
+    }
+
+    fn restore_snapshot_until(&self, deadline: Instant) -> Result<(), String> {
+        match self.saved_system_token.as_ref() {
+            Some(previous) => self.backend.write_token_until(previous, deadline),
+            None => self.backend.delete_token_until(deadline),
         }
     }
 }

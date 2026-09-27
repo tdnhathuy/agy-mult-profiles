@@ -18,7 +18,32 @@ Use `agyp` to execute AGY prompts through one explicitly selected Google account
 1. List available profiles and linked emails:
    agyp list --json
 
-2. Run a delegated coding task (RECOMMENDED):
+2. Check quota status via probe (RECOMMENDED before tasks):
+   agyp quota --profile <profile> [--timeout 30s] [--no-cache] [--json]
+   agyp quota --all [--timeout 30s] [--no-cache] [--json]
+   Example:
+   agyp quota --all --json
+   Returns:
+   {
+     "schema_version": 1,
+     "checked_at": "2026-09-27T16:00:00Z",
+     "source": "probe",
+     "results": [
+       {
+         "profile": "profile-1",
+         "email": "user@example.com",
+         "status": "available",
+         "observed_at": "2026-09-27T16:00:00Z",
+         "cached": false,
+         "detail": "Probe completed successfully",
+         "agent_exit_code": 0
+       }
+     ]
+   }
+   Exit codes: 0 = all available, 2 = quota_exhausted or unauthenticated, 1 = error/timeout/unknown/unsupported.
+   Note: `--timeout` is one total command deadline shared by lock acquisition and every profile in `--all`; it is not per-profile. Top-level and per-result `source` are `probe`, `cache`, `preflight`, or `mixed` according to provenance. AGY 1.2.12 has no official quota endpoint, so this command reports observed health only—not percentages, usage totals, remaining requests, or reset times.
+
+3. Run a delegated coding task (RECOMMENDED):
    agyp task --profile <profile> --worktree <linked-worktree-path> --prompt-file <path> [--timeout 20m] [--skip-permissions] [--json]
    Example:
    agyp task --profile p1 --worktree /path/to/worktree --prompt-file prompt.txt --json

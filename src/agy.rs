@@ -103,6 +103,7 @@ pub fn build_agy_command(profile_dir: &Path, extra_args: &[String]) -> Result<Co
     Ok(cmd)
 }
 
+#[derive(Debug, Clone)]
 pub struct CapturedOutput {
     pub status: Option<ExitStatus>,
     pub stdout: Vec<u8>,
