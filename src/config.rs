@@ -59,8 +59,8 @@ impl ProfileRegistry {
     pub fn save(&self, path: &Path) -> Result<(), String> {
         let parent = path.parent().unwrap_or_else(|| Path::new(""));
         if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create parent dir: {}", e))?;
+            crate::security::secure_dir(parent)
+                .map_err(|e| format!("Failed to create private parent dir: {}", e))?;
         }
 
         let file_name = path
@@ -78,9 +78,17 @@ impl ProfileRegistry {
 
         let write_and_sync = || -> std::io::Result<()> {
             use std::io::Write;
-            let mut file = fs::File::create(&tmp_path)?;
+            let mut options = fs::OpenOptions::new();
+            options.create(true).truncate(true).write(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&tmp_path)?;
             file.write_all(content.as_bytes())?;
             file.sync_all()?;
+            crate::security::set_private_file_permissions(&tmp_path)?;
             Ok(())
         };
 

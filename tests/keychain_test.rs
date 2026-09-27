@@ -5,6 +5,8 @@ use tempfile::tempdir;
 
 #[path = "../src/keychain.rs"]
 mod keychain;
+#[path = "../src/security.rs"]
+mod security;
 use keychain::{
     decode_jwt_payload, extract_email_from_token_string, load_token_from_profile,
     save_token_to_profile,

@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use crate::agy::build_agy_command;
+use crate::agy::{build_agy_command, run_command_interruptibly};
 use crate::config::ProfileRegistry;
 
 pub fn cmd_exec(profile_arg: &str, raw_args: &[String]) -> Result<(), i32> {
@@ -20,7 +20,18 @@ pub fn cmd_exec(profile_arg: &str, raw_args: &[String]) -> Result<(), i32> {
         127
     })?;
 
-    let _keychain_guard = crate::keychain::KeychainGuard::new(&profile.dir).map_err(|e| {
+    let lock_path = ProfileRegistry::get_profiles_dir().join("agyp.lock");
+    let _process_lock = crate::security::ProcessLock::acquire(&lock_path).map_err(|e| {
+        eprintln!("Failed to serialize AGY profile access: {e}");
+        1
+    })?;
+    let profiles_root = ProfileRegistry::get_profiles_dir().join("profiles");
+    let profile_dir = crate::security::validate_profile_dir_under(&profile.dir, &profiles_root)
+        .map_err(|e| {
+            eprintln!("Invalid profile directory: {e}");
+            1
+        })?;
+    let keychain_guard = crate::keychain::KeychainGuard::new(&profile_dir).map_err(|e| {
         eprintln!(
             "Failed to configure keychain for profile '{}': {}",
             profile.name, e
@@ -28,8 +39,12 @@ pub fn cmd_exec(profile_arg: &str, raw_args: &[String]) -> Result<(), i32> {
         1
     })?;
 
-    let status = cmd.status().map_err(|e| {
-        eprintln!("Failed to run agy: {}", e);
+    let status = run_command_interruptibly(&mut cmd).map_err(|e| {
+        eprintln!("{e}");
+        1
+    })?;
+    keychain_guard.sync_and_restore().map_err(|e| {
+        eprintln!("Failed to persist or restore Keychain state: {e}");
         1
     })?;
 

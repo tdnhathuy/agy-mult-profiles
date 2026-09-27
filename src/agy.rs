@@ -3,7 +3,9 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, ExitStatus, Stdio};
+use std::thread;
+use std::time::Duration;
 
 pub fn locate_agy_binary() -> Result<PathBuf, String> {
     // 1. Check PATH
@@ -99,4 +101,76 @@ pub fn build_agy_command(profile_dir: &Path, extra_args: &[String]) -> Result<Co
         cmd.arg(arg);
     }
     Ok(cmd)
+}
+
+pub struct CapturedOutput {
+    pub status: ExitStatus,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+}
+
+pub fn run_command_captured_interruptibly(cmd: &mut Command) -> Result<CapturedOutput, String> {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to execute agy: {e}"))?;
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    let status = loop {
+        if crate::security::ProcessLock::interrupted() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("Interrupted while AGY was running; credentials were restored".to_string());
+        }
+        match child
+            .try_wait()
+            .map_err(|e| format!("Failed to wait for agy: {e}"))?
+        {
+            Some(status) => break status,
+            None => thread::sleep(Duration::from_millis(100)),
+        }
+    };
+
+    let mut stdout_bytes = Vec::new();
+    let mut stderr_bytes = Vec::new();
+    if let Some(mut pipe) = stdout {
+        std::io::Read::read_to_end(&mut pipe, &mut stdout_bytes)
+            .map_err(|e| format!("Failed to collect agy stdout: {e}"))?;
+    }
+    if let Some(mut pipe) = stderr {
+        std::io::Read::read_to_end(&mut pipe, &mut stderr_bytes)
+            .map_err(|e| format!("Failed to collect agy stderr: {e}"))?;
+    }
+    Ok(CapturedOutput {
+        status,
+        stdout: stdout_bytes,
+        stderr: stderr_bytes,
+    })
+}
+
+pub fn run_command_interruptibly(cmd: &mut Command) -> Result<ExitStatus, String> {
+    cmd.stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to execute agy: {e}"))?;
+
+    loop {
+        if crate::security::ProcessLock::interrupted() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("Interrupted while AGY was running; credentials were restored".to_string());
+        }
+        match child
+            .try_wait()
+            .map_err(|e| format!("Failed to wait for agy: {e}"))?
+        {
+            Some(status) => return Ok(status),
+            None => thread::sleep(Duration::from_millis(100)),
+        }
+    }
 }

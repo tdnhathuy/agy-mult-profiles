@@ -9,7 +9,7 @@ CLI tool written in Rust to manage multiple Google Antigravity (`agy`) accounts 
 - **True macOS Keychain Isolation**: Solves `agy`'s global Keychain auto-login collision by isolating credentials per profile (`~/.gemini-profiles/profiles/<name>/keychain_token.json`).
 - **Seamless Browser OAuth**: Automatically clears Keychain prior to login so Google displays the account selection screen (`prompt=consent`).
 - **AI Agent-First Ergonomics**:
-  - Non-interactive prompts with `--dangerously-skip-permissions` by default.
+  - Non-interactive prompts keep AGY permission checks enabled by default; `--skip-permissions` is explicit.
   - Zero wrapper noise: clean stdout streaming.
   - `--json` output support for programmatic agent parsing.
   - Exit code contracts (`0` = success, `1` = not found/invalid, `2` = unauthenticated, `127` = binary missing).
@@ -128,7 +128,7 @@ Rules for Hermes:
 5. If a command returns exit code 2 (unauthenticated):
    Notify the user to run `agyp login <profile>` in an interactive terminal.
 6. Rate Limit Handling:
-   If a profile encounters rate limits (Resource Exhausted / 429), switch to an alternative profile (e.g. from p1 to p2).
+   If the selected profile encounters Resource Exhausted / 429, keep it pinned, inspect worktree state before any retry, and report the blocker. Never switch profiles automatically.
 ```
 
 ---

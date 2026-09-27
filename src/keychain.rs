@@ -115,7 +115,7 @@ pub fn write_system_keychain_token(token: &str) -> Result<(), String> {
             token,
         ])
         .output()
-        .map_err(|e| format!("Failed to invoke security tool: {}", e))?;
+        .map_err(|e| format!("Failed to invoke security tool: {e}"))?;
 
     if output.status.success() {
         Ok(())
@@ -155,8 +155,10 @@ pub fn delete_system_keychain_token() -> Result<(), String> {
 
 /// Saves the given token string into the profile directory under keychain_token.json.
 pub fn save_token_to_profile(profile_dir: &Path, token: &str) -> io::Result<Option<String>> {
+    crate::security::secure_dir(profile_dir)?;
     let token_path = profile_dir.join(TOKEN_FILENAME);
-    fs::write(&token_path, token)?;
+    crate::security::reject_symlink(&token_path)?;
+    crate::security::write_private_file(&token_path, token.as_bytes())?;
     let email = extract_email_from_token_string(token);
     Ok(email)
 }
@@ -194,12 +196,14 @@ pub struct KeychainGuard {
 
 impl KeychainGuard {
     pub fn new(target_profile_dir: &Path) -> Result<Self, String> {
+        let profile_token = load_token_from_profile(target_profile_dir).ok_or_else(|| {
+            format!(
+                "No saved Keychain token in profile directory {}",
+                target_profile_dir.display()
+            )
+        })?;
         let current_system_token = read_system_keychain_token();
-
-        // If the profile has a saved token, activate it
-        if let Some(profile_token) = load_token_from_profile(target_profile_dir) {
-            write_system_keychain_token(&profile_token)?;
-        }
+        write_system_keychain_token(&profile_token)?;
 
         Ok(Self {
             saved_system_token: current_system_token,
@@ -207,29 +211,45 @@ impl KeychainGuard {
         })
     }
 
-    /// Explicitly sync any updated Keychain token back to the profile directory
-    /// before dropping or finishing.
-    pub fn sync_and_restore(mut self) {
-        self.cleanup();
+    /// Captures a refreshed token and restores the exact prior Keychain state.
+    pub fn sync_and_restore(mut self) -> Result<(), String> {
+        self.cleanup()
     }
 
-    fn cleanup(&mut self) {
-        if let Some(target_dir) = self.target_profile_dir.take() {
-            // If agy refreshed or wrote a token during execution, capture it
-            if let Some(active_token) = read_system_keychain_token() {
-                let _ = save_token_to_profile(&target_dir, &active_token);
-            }
-        }
+    fn cleanup(&mut self) -> Result<(), String> {
+        let Some(target_dir) = self.target_profile_dir.take() else {
+            return Ok(());
+        };
 
-        // Restore original system token
-        if let Some(prev) = self.saved_system_token.take() {
-            let _ = write_system_keychain_token(&prev);
+        let persist_result = match read_system_keychain_token() {
+            Some(active_token) => save_token_to_profile(&target_dir, &active_token)
+                .map(|_| ())
+                .map_err(|e| format!("Failed to persist refreshed profile token: {e}")),
+            None => Err("AGY removed or failed to expose the active Keychain token".to_string()),
+        };
+
+        let restore_result = match self.saved_system_token.take() {
+            Some(prev) => write_system_keychain_token(&prev),
+            None => delete_system_keychain_token(),
+        };
+
+        match (persist_result, restore_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(persist), Ok(())) => Err(persist),
+            (Ok(()), Err(restore)) => {
+                Err(format!("Failed to restore prior Keychain state: {restore}"))
+            }
+            (Err(persist), Err(restore)) => Err(format!(
+                "{persist}; also failed to restore prior Keychain state: {restore}"
+            )),
         }
     }
 }
 
 impl Drop for KeychainGuard {
     fn drop(&mut self) {
-        self.cleanup();
+        if let Err(error) = self.cleanup() {
+            eprintln!("Warning: failed to restore Keychain state: {error}");
+        }
     }
 }

@@ -4,7 +4,10 @@ use chrono::Utc;
 use serde_json::json;
 use std::io::{self, Read};
 
-use crate::agy::{build_agy_command, check_profile_auth};
+use crate::agy::{
+    build_agy_command, check_profile_auth, run_command_captured_interruptibly,
+    run_command_interruptibly,
+};
 use crate::config::ProfileRegistry;
 
 fn print_json_error(profile: &str, email: Option<&str>, exit_code: i32, error_msg: &str) {
@@ -32,7 +35,7 @@ pub fn cmd_prompt(
     prompt_text_arg: Option<&str>,
     model: Option<&str>,
     add_dirs: &[String],
-    no_skip_perm: bool,
+    skip_permissions: bool,
     json_output: bool,
 ) -> Result<(), i32> {
     let config_path = ProfileRegistry::get_config_file_path();
@@ -118,7 +121,7 @@ pub fn cmd_prompt(
 
     // Build args
     let mut args = Vec::new();
-    if !no_skip_perm {
+    if skip_permissions {
         args.push("--dangerously-skip-permissions".to_string());
     }
     if let Some(m) = model {
@@ -148,8 +151,20 @@ pub fn cmd_prompt(
         }
     };
 
-    // Activate target profile credentials in macOS Keychain for agy execution
-    let _keychain_guard = crate::keychain::KeychainGuard::new(&profile.dir).map_err(|e| {
+    let lock_path = ProfileRegistry::get_profiles_dir().join("agyp.lock");
+    let _process_lock = crate::security::ProcessLock::acquire(&lock_path).map_err(|e| {
+        eprintln!("Failed to serialize AGY profile access: {e}");
+        1
+    })?;
+    let profiles_root = ProfileRegistry::get_profiles_dir().join("profiles");
+    let profile_dir = crate::security::validate_profile_dir_under(&profile.dir, &profiles_root)
+        .map_err(|e| {
+            eprintln!("Invalid profile directory: {e}");
+            1
+        })?;
+
+    // Activate target profile credentials only while holding the global process lock.
+    let keychain_guard = crate::keychain::KeychainGuard::new(&profile_dir).map_err(|e| {
         let err_msg = format!(
             "Failed to configure keychain for profile '{}': {}",
             profile.name, e
@@ -168,7 +183,7 @@ pub fn cmd_prompt(
     })?;
 
     if json_output {
-        let output = match cmd.output() {
+        let output = match run_command_captured_interruptibly(&mut cmd) {
             Ok(o) => o,
             Err(e) => {
                 let err_msg = format!("Failed to execute agy: {}", e);
@@ -185,25 +200,31 @@ pub fn cmd_prompt(
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         let exit_code = output.status.code().unwrap_or(1);
 
+        let restore_result = keychain_guard.sync_and_restore();
+        let restore_ok = restore_result.is_ok();
         let result = json!({
             "profile": profile.name,
             "email": profile.email,
-            "status": if exit_code == 0 { "success" } else { "error" },
-            "exit_code": exit_code,
+            "status": if exit_code == 0 && restore_ok { "success" } else { "error" },
+            "exit_code": if exit_code == 0 && !restore_ok { 1 } else { exit_code },
             "output": stdout,
-            "error": if stderr.is_empty() { None } else { Some(stderr) }
+            "error": restore_result.err().or(if stderr.is_empty() { None } else { Some(stderr) })
         });
         println!("{}", serde_json::to_string_pretty(&result).unwrap());
-        return if exit_code == 0 {
+        return if exit_code == 0 && restore_ok {
             Ok(())
         } else {
-            Err(exit_code)
+            Err(if exit_code == 0 { 1 } else { exit_code })
         };
     }
 
     // Direct streaming mode for AI agents / humans
-    let status = cmd.status().map_err(|e| {
-        eprintln!("Failed to execute agy: {}", e);
+    let status = run_command_interruptibly(&mut cmd).map_err(|e| {
+        eprintln!("{e}");
+        1
+    })?;
+    keychain_guard.sync_and_restore().map_err(|e| {
+        eprintln!("Failed to persist or restore Keychain state: {e}");
         1
     })?;
 

@@ -5,6 +5,8 @@ use tempfile::tempdir;
 mod agy;
 #[path = "../src/keychain.rs"]
 mod keychain;
+#[path = "../src/security.rs"]
+mod security;
 use agy::{build_agy_command, check_profile_auth, extract_profile_email, locate_agy_binary};
 
 #[test]

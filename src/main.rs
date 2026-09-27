@@ -2,6 +2,7 @@ mod agy;
 mod commands;
 mod config;
 pub mod keychain;
+mod security;
 
 use clap::{Parser, Subcommand};
 
@@ -64,9 +65,9 @@ enum Commands {
         /// Directory to attach to agy context
         #[arg(long = "add-dir")]
         add_dir: Vec<String>,
-        /// Do not automatically skip permissions (which is enabled by default)
+        /// Auto-approve AGY tool permissions (use only in an isolated worktree)
         #[arg(long)]
-        no_skip_perm: bool,
+        skip_permissions: bool,
         /// Output result in JSON format
         #[arg(long)]
         json: bool,
@@ -129,14 +130,14 @@ fn main() {
             prompt,
             model,
             add_dir,
-            no_skip_perm,
+            skip_permissions,
             json,
         }) => commands::prompt::cmd_prompt(
             profile.as_deref(),
             prompt.as_deref(),
             model.as_deref(),
             add_dir,
-            *no_skip_perm,
+            *skip_permissions,
             *json,
         ),
         Some(Commands::Exec { profile, args }) => commands::exec::cmd_exec(profile, args),

@@ -1,36 +1,80 @@
 ---
 name: agyp
-description: Use when you need to query or run tasks across multiple Antigravity (agy) accounts or profiles. Supports listing profiles, selecting work/personal accounts, and running non-interactive prompts.
+version: 0.2.0
+description: "Use when delegating coding to AGY through one explicit Antigravity profile. Pins the profile, serializes credentials, isolates edits in a worktree, and leaves review/integration to Hermes."
+platforms: [macos]
+metadata:
+  hermes:
+    tags: [coding-agent, antigravity, multi-profile, delegation, worktree]
+    related_skills: [agentic-development-orchestration, isolated-worktree-development, requesting-code-review]
 ---
 
-# Antigravity Multi-Profile CLI (`agyp`)
+# AGY Multi-Profile Delegation
 
-Use this skill when interacting with Google Antigravity across different accounts.
+Use `agyp` to delegate implementation to AGY while Hermes/SOL owns planning, review, testing, commits, merges, and pushes.
 
-## 1. Inspect Available Profiles
+## Preconditions
+
+1. Verify binaries and profiles:
+   ```bash
+   command -v agyp && agyp --version
+   command -v agy && agy --version
+   agyp list --json
+   ```
+2. Select one explicit authenticated profile from the list and pin it for the task.
+3. Never omit the profile, use implicit defaults, round-robin, or automatically switch after `429`.
+4. For coding, create or select an isolated Git worktree. Verify its branch and clean/known status before execution.
+
+`agyp` serializes profile/Keychain activation across processes. Multiple callers may queue, but AGY profile sessions run one at a time under the shared macOS Keychain.
+
+## Invocation
+
+Run AGY with the isolated worktree as the terminal tool's `workdir`:
+
 ```bash
-agyp list --json
+agyp prompt <selected-profile> "<scoped task>"
 ```
-Returns a JSON object with all configured profiles, their linked Google emails, and aliases.
 
-## 2. Execute a Prompt on a Specific Profile
-To send a prompt non-interactively without user interruption:
+Permission auto-approval is **off by default**. Only with explicit user authorization, and only inside a disposable isolated worktree, add:
+
 ```bash
-agyp prompt <profile_or_alias> "<prompt text>"
+agyp prompt <selected-profile> --skip-permissions "<scoped task>"
 ```
 
-### Examples:
-- Use alias: `agyp prompt p1 "Check current git status"`
-- Use model flag: `agyp prompt work --model gemini-2.5-flash "Summarize changes"`
-- Pipe content: `cat error.log | agyp prompt personal "Analyze this crash stacktrace"`
+`--add-dir` adds context; it does not change AGY's working directory.
 
-## 3. Advanced Pass-Through Commands
-To run arbitrary `agy` options under a profile:
+For stdin input, omit the positional prompt:
+
 ```bash
-agyp exec <profile_or_alias> -- --continue
+{ printf '%s\n\n' '<instruction>'; cat <file>; } | agyp prompt <selected-profile>
 ```
 
-## 4. Handling Unauthenticated Errors (Exit Code 2)
-If a prompt fails with exit code 2:
-- The profile is not logged in.
-- Prompt the user to run: `agyp login <profile>` in an interactive terminal.
+Use `agyp exec <selected-profile> -- <agy-args>` only for AGY flags unsupported by `prompt`. Do not use `--continue` unless the conversation belongs to this exact task.
+
+## Delegation Contract
+
+Every coding prompt must state:
+
+- Work only inside `<absolute-worktree-path>`.
+- Inspect, implement, and run relevant tests.
+- Do not touch the canonical checkout or `main`/`master`.
+- Do not commit, merge, rebase, cherry-pick, push, or manage remotes.
+- Report changed files, exact tests run/results, and unresolved risks.
+
+Hermes/SOL independently inspects the complete diff and reruns repository gates. A successful AGY exit is not an integration approval.
+
+## Rate Limits and Failures
+
+- On authentication failure, stop and ask the user to run `agyp login <profile>` interactively. Never automate Google login or handle credentials directly.
+- On `429` or resource exhaustion, do not switch profiles and do not blindly rerun a mutating prompt. Inspect worktree state first; stop and report the blocker unless the user explicitly authorizes a bounded retry on the same profile.
+- Never print, read back, or include token files in prompts, logs, diffs, or chat.
+
+## Parent Review Gate
+
+After AGY returns:
+
+1. Inspect `git status --short --branch` and the complete diff.
+2. Reject unrelated files or ownership violations.
+3. Run the repository's format, lint, typecheck, test, and build gates as applicable.
+4. Independently review security-sensitive changes.
+5. Only Hermes commits, integrates, merges, or pushes.

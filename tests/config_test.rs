@@ -3,6 +3,8 @@ use tempfile::tempdir;
 
 #[path = "../src/config.rs"]
 mod config;
+#[path = "../src/security.rs"]
+mod security;
 use config::{ProfileInfo, ProfileRegistry};
 
 #[test]

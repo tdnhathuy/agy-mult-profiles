@@ -9,15 +9,28 @@ use crate::agy::{check_profile_auth, extract_profile_email, locate_agy_binary};
 use crate::config::{ProfileInfo, ProfileRegistry};
 
 pub fn cmd_login(name: &str, import_current: bool) -> Result<(), i32> {
+    crate::security::validate_component(name, "profile name").map_err(|e| {
+        eprintln!("Error: {e}");
+        1
+    })?;
     let config_path = ProfileRegistry::get_config_file_path();
     let mut reg = ProfileRegistry::load_or_default(&config_path).map_err(|e| {
         eprintln!("Error: {}", e);
         1
     })?;
+    let lock_path = ProfileRegistry::get_profiles_dir().join("agyp.lock");
+    let _process_lock = crate::security::ProcessLock::acquire(&lock_path).map_err(|e| {
+        eprintln!("Failed to serialize AGY profile access: {e}");
+        1
+    })?;
 
     let profiles_root = ProfileRegistry::get_profiles_dir().join("profiles");
+    crate::security::secure_dir(&profiles_root).map_err(|e| {
+        eprintln!("Failed to secure profiles directory: {e}");
+        1
+    })?;
     let profile_dir = profiles_root.join(name);
-    fs::create_dir_all(&profile_dir).map_err(|e| {
+    crate::security::secure_dir(&profile_dir).map_err(|e| {
         eprintln!("Failed to create profile directory: {}", e);
         1
     })?;
@@ -47,24 +60,39 @@ pub fn cmd_login(name: &str, import_current: bool) -> Result<(), i32> {
                 let src = default_gemini.join(file);
                 let dst = profile_dir.join(file);
                 if src.exists() {
-                    let _ = fs::copy(&src, &dst);
+                    crate::security::reject_symlink(&dst).map_err(|e| {
+                        eprintln!("Refusing unsafe credential destination: {e}");
+                        1
+                    })?;
+                    fs::copy(&src, &dst).map_err(|e| {
+                        eprintln!("Failed to import credential file '{}': {e}", file);
+                        1
+                    })?;
+                    crate::security::set_private_file_permissions(&dst).map_err(|e| {
+                        eprintln!("Failed to secure imported credential file '{}': {e}", file);
+                        1
+                    })?;
                 }
             }
         }
     } else {
         // Fresh interactive login for a new account:
-        // 1. Back up whatever is currently in system Keychain
+        // 1. Back up the exact Keychain state and restore it after login.
         let prev_keychain_token = crate::keychain::read_system_keychain_token();
 
-        // 2. Remove the existing Keychain token so agy cannot silently auto-authenticate with the old account
+        // 2. Remove the existing token so AGY cannot silently reuse the old account.
         let _ = crate::keychain::delete_system_keychain_token();
 
         let agy_bin = match locate_agy_binary() {
             Ok(b) => b,
             Err(e) => {
                 eprintln!("Error: {}", e);
-                if let Some(prev) = &prev_keychain_token {
-                    let _ = crate::keychain::write_system_keychain_token(prev);
+                let restore = match prev_keychain_token {
+                    Some(ref prev) => crate::keychain::write_system_keychain_token(prev),
+                    None => crate::keychain::delete_system_keychain_token(),
+                };
+                if let Err(restore_err) = restore {
+                    eprintln!("Failed to restore prior Keychain state: {restore_err}");
                 }
                 return Err(127);
             }
@@ -73,31 +101,40 @@ pub fn cmd_login(name: &str, import_current: bool) -> Result<(), i32> {
         println!("Initiating Google OAuth login for profile '{}'...", name);
         println!("Please sign in with the Google account for this profile in your browser.");
 
-        let status_res = std::process::Command::new(agy_bin)
-            .arg(format!("--gemini_dir={}", profile_dir.display()))
-            .status();
+        let mut login_cmd = std::process::Command::new(agy_bin);
+        login_cmd.arg(format!("--gemini_dir={}", profile_dir.display()));
+        let status_res = crate::agy::run_command_interruptibly(&mut login_cmd);
 
-        // Check if agy wrote a new token into macOS Keychain
-        let new_token = crate::keychain::read_system_keychain_token();
+        let persist_result = match crate::keychain::read_system_keychain_token() {
+            Some(token) => crate::keychain::save_token_to_profile(&profile_dir, &token)
+                .map(|_| ())
+                .map_err(|e| format!("Failed to save profile credential: {e}")),
+            None => Err("Login was cancelled or failed to authenticate with Google.".to_string()),
+        };
+        let restore_result = match prev_keychain_token {
+            Some(prev) => crate::keychain::write_system_keychain_token(&prev),
+            None => crate::keychain::delete_system_keychain_token(),
+        };
 
-        if let Some(token) = new_token {
-            let _ = crate::keychain::save_token_to_profile(&profile_dir, &token);
-            println!("Authentication completed successfully.");
-        } else {
-            // Restore previous token if login failed or was cancelled
-            if let Some(prev) = &prev_keychain_token {
-                let _ = crate::keychain::write_system_keychain_token(prev);
-            }
-            eprintln!("Login was cancelled or failed to authenticate with Google.");
+        if let Err(e) = restore_result {
+            eprintln!("Failed to restore prior Keychain state: {e}");
+            return Err(1);
+        }
+        if let Err(e) = persist_result {
+            eprintln!("{e}");
             return Err(status_res.map(|s| s.code().unwrap_or(1)).unwrap_or(1));
         }
-
-        // If another default profile was already set and different from this one, restore its token to system Keychain
-        if let Some(ref def_name) = reg.default_profile {
-            if def_name != name {
-                if let Some(prev) = &prev_keychain_token {
-                    let _ = crate::keychain::write_system_keychain_token(prev);
-                }
+        match status_res {
+            Ok(status) if status.success() => {
+                println!("Authentication completed successfully.");
+            }
+            Ok(status) => {
+                eprintln!("AGY login exited unsuccessfully after writing credentials.");
+                return Err(status.code().unwrap_or(1));
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                return Err(1);
             }
         }
     }
@@ -188,14 +225,20 @@ pub fn cmd_list(json_output: bool) -> Result<(), i32> {
     Ok(())
 }
 
-pub fn cmd_default(profile: Option<&str>) -> Result<(), i32> {
+pub fn cmd_default(profile_arg: Option<&str>) -> Result<(), i32> {
+    if let Some(name) = profile_arg {
+        crate::security::validate_component(name, "profile name or alias").map_err(|e| {
+            eprintln!("Error: {e}");
+            1
+        })?;
+    }
     let config_path = ProfileRegistry::get_config_file_path();
     let mut reg = ProfileRegistry::load_or_default(&config_path).map_err(|e| {
         eprintln!("Error: {}", e);
         1
     })?;
 
-    match profile {
+    match profile_arg {
         Some(target) => {
             let prof_dir = reg.resolve_profile(target).map(|p| p.dir.clone());
             reg.set_default_profile(target).map_err(|e| {
@@ -225,6 +268,10 @@ pub fn cmd_default(profile: Option<&str>) -> Result<(), i32> {
 }
 
 pub fn cmd_rm(name: &str, yes: bool) -> Result<(), i32> {
+    crate::security::validate_component(name, "profile name or alias").map_err(|e| {
+        eprintln!("Error: {e}");
+        1
+    })?;
     let config_path = ProfileRegistry::get_config_file_path();
     let mut reg = ProfileRegistry::load_or_default(&config_path).map_err(|e| {
         eprintln!("Error: {}", e);
@@ -253,7 +300,14 @@ pub fn cmd_rm(name: &str, yes: bool) -> Result<(), i32> {
         }
     }
 
-    let _ = fs::remove_dir_all(&profile.dir);
+    let safe_profile_dir = crate::security::validate_profile_dir(&profile.dir).map_err(|e| {
+        eprintln!("Refusing to delete unsafe profile path: {e}");
+        1
+    })?;
+    fs::remove_dir_all(&safe_profile_dir).map_err(|e| {
+        eprintln!("Failed to delete profile directory: {e}");
+        1
+    })?;
     reg.remove_profile(&profile.name).map_err(|e| {
         eprintln!("Error: {}", e);
         1

@@ -8,6 +8,8 @@ mod commands;
 mod config;
 #[path = "../src/keychain.rs"]
 mod keychain;
+#[path = "../src/security.rs"]
+mod security;
 
 use agy::build_agy_command;
 

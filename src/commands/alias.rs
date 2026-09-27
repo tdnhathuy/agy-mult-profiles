@@ -5,6 +5,14 @@ use serde_json::json;
 use crate::config::ProfileRegistry;
 
 pub fn cmd_alias_set(alias: &str, profile_name: &str) -> Result<(), i32> {
+    crate::security::validate_component(alias, "alias").map_err(|e| {
+        eprintln!("Error: {e}");
+        1
+    })?;
+    crate::security::validate_component(profile_name, "profile name").map_err(|e| {
+        eprintln!("Error: {e}");
+        1
+    })?;
     let config_path = ProfileRegistry::get_config_file_path();
     let mut reg = ProfileRegistry::load_or_default(&config_path).map_err(|e| {
         eprintln!("Error: {}", e);
@@ -26,6 +34,10 @@ pub fn cmd_alias_set(alias: &str, profile_name: &str) -> Result<(), i32> {
 }
 
 pub fn cmd_alias_rm(alias: &str) -> Result<(), i32> {
+    crate::security::validate_component(alias, "alias").map_err(|e| {
+        eprintln!("Error: {e}");
+        1
+    })?;
     let config_path = ProfileRegistry::get_config_file_path();
     let mut reg = ProfileRegistry::load_or_default(&config_path).map_err(|e| {
         eprintln!("Error: {}", e);
