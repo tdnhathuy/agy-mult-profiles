@@ -18,7 +18,13 @@ Use `agyp` to execute AGY prompts through one explicitly selected Google account
 1. List available profiles and linked emails:
    agyp list --json
 
-2. Check quota status via probe (RECOMMENDED before tasks):
+2. Quick-check detailed Gemini quota (5-hour and weekly only):
+   agyp q
+   agyp q <profile>
+   agyp usage [<profile>] [--json]
+   Omitting `<profile>` checks every registered profile sequentially. Claude/GPT rows are intentionally omitted. Reset times are formatted as `HH:MM:SS DD/MM/YYYY (GMT+7)` for Vietnam.
+
+3. Check quota status via probe (RECOMMENDED before tasks):
    agyp quota --profile <profile> [--timeout 30s] [--no-cache] [--json]
    agyp quota --all [--timeout 30s] [--no-cache] [--json]
    Example:
@@ -41,9 +47,9 @@ Use `agyp` to execute AGY prompts through one explicitly selected Google account
      ]
    }
    Exit codes: 0 = all available, 2 = quota_exhausted or unauthenticated, 1 = error/timeout/unknown/unsupported.
-   Note: `--timeout` is one total command deadline shared by lock acquisition and every profile in `--all`; it is not per-profile. Top-level and per-result `source` are `probe`, `cache`, `preflight`, or `mixed` according to provenance. AGY 1.2.12 has no official quota endpoint, so this command reports observed health only—not percentages, usage totals, remaining requests, or reset times.
+   Note: `--timeout` is one total command deadline shared by lock acquisition and every profile in `--all`; it is not per-profile. Top-level and per-result `source` are `probe`, `cache`, `preflight`, or `mixed` according to provenance. AGY 1.2.12 exposes exact Gemini percentages and reset timestamps through `/usage`; this command surfaces those authoritative values. The separate `agyp quota` command remains an observed-health probe.
 
-3. Run a delegated coding task (RECOMMENDED):
+4. Run a delegated coding task (RECOMMENDED):
    agyp task --profile <profile> --worktree <linked-worktree-path> --prompt-file <path> [--timeout 20m] [--skip-permissions] [--json]
    Example:
    agyp task --profile p1 --worktree /path/to/worktree --prompt-file prompt.txt --json

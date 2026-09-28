@@ -33,6 +33,18 @@ Use `agyp` to delegate implementation to AGY while Hermes/SOL owns planning, rev
 
 ## Invocation
 
+### Quick Gemini Usage: `agyp usage` / `agyp q`
+
+Show authoritative `/usage` percentages for Gemini only. Omit the profile to check every registered profile sequentially:
+
+```bash
+agyp q
+agyp q <profile>
+agyp usage [<profile>] [--json]
+```
+
+The display includes only Gemini 5-hour and weekly remaining percentages. Reset timestamps use Vietnam time (`HH:MM:SS DD/MM/YYYY (GMT+7)`). Claude/GPT rows are intentionally omitted.
+
 ### Quota Probing: `agyp quota`
 
 Probe per-profile quota status using the minimal, non-mutating probe:

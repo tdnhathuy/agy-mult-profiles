@@ -120,6 +120,8 @@ Rules for Hermes:
 2. Check quota availability before assigning tasks:
    `agyp quota --all --json`
    (Note: Uses a minimal observed-health probe; cached for 5m; `--timeout` is one total deadline for the whole sequential run; never rotates profiles automatically on 429).
+   For a quick Gemini-only percentage check with Vietnam reset times:
+   `agyp q` (all profiles) or `agyp q <profile>`.
 3. For coding tasks, ALWAYS use `agyp task` in an isolated Git linked worktree:
    `agyp task --profile <profile> --worktree <worktree-path> --prompt-file <path> --timeout <duration> --json`
    Or pipe prompt via stdin:
@@ -139,6 +141,7 @@ Rules for Hermes:
 
 | Lệnh | Mô tả |
 | :--- | :--- |
+| `agyp q` / `agyp q <profile>` | Quick check Gemini 5 giờ + hàng tuần; ẩn Claude/GPT; reset theo giờ Việt Nam |
 | `agyp quota --profile <p>` / `--all` | Kiểm tra trạng thái quota qua probe tối giản, an toàn, hỗ trợ cache 5 phút & JSON output |
 | `agyp task --profile <p> --worktree <path>` | Chạy task tự động trong Git linked worktree với stream draining, timeout & JSON classification |
 | `agyp login <name>` | Đăng nhập tài khoản mới qua trình duyệt OAuth |

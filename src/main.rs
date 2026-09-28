@@ -123,6 +123,15 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Show detailed Gemini quota for one profile
+    #[command(alias = "q")]
+    Usage {
+        /// Name of one profile or alias (omit to check all profiles)
+        profile: Option<String>,
+        /// Output in JSON format
+        #[arg(long)]
+        json: bool,
+    },
     /// Show version or ping
     Ping,
 }
@@ -352,6 +361,9 @@ fn main() {
             *json,
         ),
         Some(Commands::Exec { profile, args }) => commands::exec::cmd_exec(profile, args),
+        Some(Commands::Usage { profile, json }) => {
+            commands::usage::cmd_usage(profile.as_deref(), *json)
+        }
         Some(Commands::Ping) => {
             println!("pong");
             Ok(())
