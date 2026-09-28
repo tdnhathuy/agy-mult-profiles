@@ -67,6 +67,18 @@ fn vietnam_rfc3339_is_machine_readable_with_plus_seven_offset() {
 }
 
 #[test]
+fn quick_text_includes_profile_email() {
+    let raw = concat!(
+        "Gemini Models\tWeekly Limit Remaining\t42%\t2026-10-01T17:26:35Z\n",
+        "Gemini Models\tFive Hour Limit Remaining\t79%\t2026-09-28T06:58:39Z\n",
+    );
+    let usage = commands::usage::parse_gemini_usage(raw).unwrap();
+    let rendered = commands::usage::format_usage_text("profile-2", "user@example.com", &usage);
+
+    assert!(rendered.starts_with("profile-2 (user@example.com)\n"));
+}
+
+#[test]
 fn quick_text_omits_claude_and_gpt() {
     let raw = concat!(
         "Gemini Models\tWeekly Limit Remaining\t42%\t2026-10-01T17:26:35Z\n",
@@ -74,7 +86,7 @@ fn quick_text_omits_claude_and_gpt() {
         "Claude and GPT models\tWeekly Limit Remaining\t100%\t2026-10-05T02:27:35Z\n",
     );
     let usage = commands::usage::parse_gemini_usage(raw).unwrap();
-    let rendered = commands::usage::format_usage_text("profile-2", &usage);
+    let rendered = commands::usage::format_usage_text("profile-2", "user@example.com", &usage);
 
     assert!(rendered.contains("profile-2"));
     assert!(rendered.contains("5 giờ: 79%"));
@@ -97,20 +109,29 @@ fn quick_report_formats_multiple_profiles() {
     let report = commands::usage::format_usage_report(&[
         (
             "profile-1".to_string(),
+            "one@example.com".to_string(),
             commands::usage::parse_gemini_usage(raw_one).unwrap(),
         ),
         (
             "profile-2".to_string(),
+            "two@example.com".to_string(),
             commands::usage::parse_gemini_usage(raw_two).unwrap(),
         ),
     ]);
 
-    assert!(report.contains("profile-1"));
-    assert!(report.contains("profile-2"));
+    assert!(report.contains("profile-1 (one@example.com)"));
+    assert!(report.contains("profile-2 (two@example.com)"));
     assert!(report.contains("5 giờ: 79%"));
     assert!(report.contains("Hàng tuần: 42%"));
     assert!(!report.contains("Claude"));
     assert!(!report.contains("GPT"));
+}
+
+#[test]
+fn json_contract_includes_profile_email_field() {
+    let source = include_str!("../src/commands/usage.rs");
+    assert!(source.contains("email: String"));
+    assert!(source.contains("email: email.to_string()"));
 }
 
 #[test]

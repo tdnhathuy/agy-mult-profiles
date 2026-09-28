@@ -22,7 +22,7 @@ Use `agyp` to execute AGY prompts through one explicitly selected Google account
    agyp q
    agyp q <profile>
    agyp usage [<profile>] [--json]
-   Omitting `<profile>` checks every registered profile sequentially. Claude/GPT rows are intentionally omitted. Reset times are formatted as `HH:MM:SS DD/MM/YYYY (GMT+7)` for Vietnam.
+   Omitting `<profile>` checks every registered profile sequentially. Each result includes the profile email. Claude/GPT rows are intentionally omitted. Reset times are formatted as `HH:MM:SS DD/MM/YYYY (GMT+7)` for Vietnam.
 
 3. Check quota status via probe (RECOMMENDED before tasks):
    agyp quota --profile <profile> [--timeout 30s] [--no-cache] [--json]

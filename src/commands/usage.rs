@@ -29,13 +29,22 @@ pub struct GeminiUsage {
 
 #[derive(Debug, Clone)]
 enum ProfileUsageResult {
-    Success { profile: String, usage: GeminiUsage },
-    Error { profile: String, error: String },
+    Success {
+        profile: String,
+        email: String,
+        usage: GeminiUsage,
+    },
+    Error {
+        profile: String,
+        email: String,
+        error: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
 struct UsageJsonResult {
     profile: String,
+    email: String,
     status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     five_hour: Option<UsageJsonWindow>,
@@ -129,10 +138,11 @@ pub fn format_vietnam_datetime(timestamp: DateTime<Utc>) -> String {
         .to_string()
 }
 
-pub fn format_usage_text(profile: &str, usage: &GeminiUsage) -> String {
+pub fn format_usage_text(profile: &str, email: &str, usage: &GeminiUsage) -> String {
     format!(
-        "{}\n  5 giờ: {}% — reset {}\n  Hàng tuần: {}% — reset {}",
+        "{} ({})\n  5 giờ: {}% — reset {}\n  Hàng tuần: {}% — reset {}",
         profile,
+        email,
         usage.five_hour.remaining_percent,
         format_vietnam_datetime(usage.five_hour.reset_at),
         usage.weekly.remaining_percent,
@@ -140,17 +150,18 @@ pub fn format_usage_text(profile: &str, usage: &GeminiUsage) -> String {
     )
 }
 
-pub fn format_usage_report(results: &[(String, GeminiUsage)]) -> String {
+pub fn format_usage_report(results: &[(String, String, GeminiUsage)]) -> String {
     results
         .iter()
-        .map(|(profile, usage)| format_usage_text(profile, usage))
+        .map(|(profile, email, usage)| format_usage_text(profile, email, usage))
         .collect::<Vec<_>>()
         .join("\n\n")
 }
 
-fn usage_json_success(profile: &str, usage: &GeminiUsage) -> UsageJsonResult {
+fn usage_json_success(profile: &str, email: &str, usage: &GeminiUsage) -> UsageJsonResult {
     UsageJsonResult {
         profile: profile.to_string(),
+        email: email.to_string(),
         status: "available",
         five_hour: Some(UsageJsonWindow {
             remaining_percent: usage.five_hour.remaining_percent,
@@ -168,11 +179,12 @@ fn run_usage_for_profile(
     profile_name: &str,
     registry: &ProfileRegistry,
     agy_binary: &std::path::Path,
-) -> Result<(String, GeminiUsage), String> {
+) -> Result<(String, String, GeminiUsage), String> {
     let profile = registry
         .resolve_profile(profile_name)
         .ok_or_else(|| format!("Profile or alias '{profile_name}' not found."))?;
     let canonical = profile.name.clone();
+    let email = profile.email.clone();
     let profiles_root = ProfileRegistry::get_profiles_dir().join("profiles");
     let validated_profile_dir = validate_profile_dir_under(&profile.dir, &profiles_root)?;
 
@@ -216,7 +228,7 @@ fn run_usage_for_profile(
     let stdout = String::from_utf8(output.stdout)
         .map_err(|_| "AGY usage output is not valid UTF-8.".to_string())?;
     let usage = parse_gemini_usage(&stdout)?;
-    Ok((canonical, usage))
+    Ok((canonical, email, usage))
 }
 
 fn execute_usage(profile_name: Option<&str>) -> Result<Vec<ProfileUsageResult>, String> {
@@ -241,9 +253,17 @@ fn execute_usage(profile_name: Option<&str>) -> Result<Vec<ProfileUsageResult>, 
         .iter()
         .map(
             |name| match run_usage_for_profile(name, &registry, &agy_binary) {
-                Ok((profile, usage)) => ProfileUsageResult::Success { profile, usage },
+                Ok((profile, email, usage)) => ProfileUsageResult::Success {
+                    profile,
+                    email,
+                    usage,
+                },
                 Err(error) => ProfileUsageResult::Error {
                     profile: name.clone(),
+                    email: registry
+                        .resolve_profile(name)
+                        .map(|profile| profile.email.clone())
+                        .unwrap_or_else(|| "unknown".to_string()),
                     error,
                 },
             },
@@ -282,11 +302,18 @@ pub fn cmd_usage(profile: Option<&str>, json: bool) -> Result<(), i32> {
         let json_results = results
             .iter()
             .map(|result| match result {
-                ProfileUsageResult::Success { profile, usage } => {
-                    usage_json_success(profile, usage)
-                }
-                ProfileUsageResult::Error { profile, error } => UsageJsonResult {
+                ProfileUsageResult::Success {
+                    profile,
+                    email,
+                    usage,
+                } => usage_json_success(profile, email, usage),
+                ProfileUsageResult::Error {
+                    profile,
+                    email,
+                    error,
+                } => UsageJsonResult {
                     profile: profile.clone(),
+                    email: email.clone(),
                     status: "error",
                     five_hour: None,
                     weekly: None,
@@ -310,11 +337,19 @@ pub fn cmd_usage(profile: Option<&str>, json: bool) -> Result<(), i32> {
                 println!();
             }
             match result {
-                ProfileUsageResult::Success { profile, usage } => {
-                    println!("{}", format_usage_text(profile, usage));
+                ProfileUsageResult::Success {
+                    profile,
+                    email,
+                    usage,
+                } => {
+                    println!("{}", format_usage_text(profile, email, usage));
                 }
-                ProfileUsageResult::Error { profile, error } => {
-                    println!("{profile}\n  Lỗi: {error}");
+                ProfileUsageResult::Error {
+                    profile,
+                    email,
+                    error,
+                } => {
+                    println!("{profile} ({email})\n  Lỗi: {error}");
                 }
             }
         }

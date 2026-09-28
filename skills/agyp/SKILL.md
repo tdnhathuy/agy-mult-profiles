@@ -43,7 +43,7 @@ agyp q <profile>
 agyp usage [<profile>] [--json]
 ```
 
-The display includes only Gemini 5-hour and weekly remaining percentages. Reset timestamps use Vietnam time (`HH:MM:SS DD/MM/YYYY (GMT+7)`). Claude/GPT rows are intentionally omitted.
+The display includes the profile email plus only Gemini 5-hour and weekly remaining percentages. Reset timestamps use Vietnam time (`HH:MM:SS DD/MM/YYYY (GMT+7)`). Claude/GPT rows are intentionally omitted.
 
 ### Quota Probing: `agyp quota`
 
