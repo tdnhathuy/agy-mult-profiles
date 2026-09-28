@@ -11,6 +11,15 @@ mod keychain;
 mod security;
 
 use chrono::{TimeZone, Utc};
+use std::time::Duration;
+
+#[test]
+fn usage_transaction_timeout_allows_sixty_seconds_per_profile() {
+    assert_eq!(
+        commands::usage::DEFAULT_USAGE_TIMEOUT,
+        Duration::from_secs(60)
+    );
+}
 
 #[test]
 fn parses_only_gemini_usage_rows() {

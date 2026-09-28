@@ -10,7 +10,7 @@ use crate::keychain::KeychainGuard;
 use crate::security::{validate_profile_dir_under, ProcessLock};
 
 pub const USAGE_PROMPT: &str = "/usage";
-const DEFAULT_USAGE_TIMEOUT: Duration = Duration::from_secs(30);
+pub const DEFAULT_USAGE_TIMEOUT: Duration = Duration::from_secs(60);
 const LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 const RESTORE_EMERGENCY_TIMEOUT: Duration = Duration::from_secs(5);
 const VIETNAM_UTC_OFFSET_SECONDS: i32 = 7 * 60 * 60;

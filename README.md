@@ -121,7 +121,7 @@ Rules for Hermes:
    `agyp quota --all --json`
    (Note: Uses a minimal observed-health probe; cached for 5m; `--timeout` is one total deadline for the whole sequential run; never rotates profiles automatically on 429).
    For a quick Gemini-only percentage check with Vietnam reset times:
-   `agyp q` (all profiles) or `agyp q <profile>`. Output includes each profile's email.
+   `agyp q` (all profiles) or `agyp q <profile>`. Output includes each profile's email. Each profile has a 60-second transaction deadline; timeouts are reported without automatic retry or profile switching.
 3. For coding tasks, ALWAYS use `agyp task` in an isolated Git linked worktree:
    `agyp task --profile <profile> --worktree <worktree-path> --prompt-file <path> --timeout <duration> --json`
    Or pipe prompt via stdin:
