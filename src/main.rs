@@ -1,6 +1,7 @@
 mod agy;
 mod commands;
 mod config;
+mod isolated_probe;
 pub mod keychain;
 mod security;
 
@@ -96,6 +97,11 @@ enum Commands {
         /// Output result in JSON format
         #[arg(long)]
         json: bool,
+    },
+    /// Create an empty private sandbox for manual SSH OAuth investigation (does not invoke agy)
+    IsolatedProbe {
+        /// Explicit profile name (not an alias)
+        profile: String,
     },
     /// Execute arbitrary agy commands under a profile
     Exec {
@@ -360,6 +366,12 @@ fn main() {
             *no_cache,
             *json,
         ),
+        Some(Commands::IsolatedProbe { profile }) => {
+            isolated_probe::prepare(profile).map_err(|e| {
+                eprintln!("Isolated probe unavailable: {e}");
+                1
+            })
+        }
         Some(Commands::Exec { profile, args }) => commands::exec::cmd_exec(profile, args),
         Some(Commands::Usage { profile, json }) => {
             commands::usage::cmd_usage(profile.as_deref(), *json)

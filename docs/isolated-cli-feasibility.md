@@ -1,5 +1,14 @@
 # Isolated-file CLI auth feasibility (mock-only; blocked)
 
+## Current branch: preparatory probe only
+
+`agyp isolated-probe profile-1` creates a new, empty private directory under `$AGYP_PROFILES_DIR/isolated-probe/profile-1/home/.gemini` (default root `~/.gemini-profiles`). It rejects existing sandboxes and symlinked roots. It does not start `agy`, enroll an account, copy tokens, set environment variables, or enable parallel `exec`; its output explicitly says **not authenticated**. The command is safe to run without touching production Keychain but is not an OAuth launcher. Do not copy credentials from existing profiles into it.
+
+The [official CLI auth guide](https://antigravity.google/docs/cli/install/) distinguishes local silent native-keyring sign-in from the remote SSH OAuth flow (URL in terminal, browser authorization, code pasted into the SSH terminal). It does not document a no-Keychain contract for a spoofed SSH environment on local macOS, nor the persistence/refresh file path. The parent live probe on agy 1.2.16 used empty HOME, SSH_CONNECTION/SSH_CLIENT, and each profile's existing token in both raw keyring and decoded JSON forms; `/usage` still prompted manual OAuth and timed out after 28 seconds while the original Keychain digest remained unchanged. Thus a token file's presence cannot gate a safe isolated `exec`, and a fresh manual OAuth could still write the host Keychain or fall back to it. No automatic login attempt should be made on this machine without an independently validated backend contract or a genuinely Keychain-isolated host/container with user-supervised OAuth.
+
+For future supervised research: use a separate macOS user or VM with an empty independent Keychain, prepare a sandbox, initiate the official SSH OAuth flow from that environment, complete the browser/device prompt yourself and enter the code only in that session's masked/terminal UI—never send a code or token in chat. Inspect storage and refresh behavior without showing credential contents, then verify no host Keychain access under failure/timeout conditions before designing per-profile concurrent execution. This branch intentionally provides no automatic OAuth invocation or unsupported parallel mode.
+
+
 **Decision: do not enable an isolated-file backend.** Preserve the existing global `agyp.lock`/`KeychainGuard` transactions. The tests in `tests/isolated_cli_feasibility_test.rs` use a shell mock and fake token strings; they prove only that independent fake HOME directories, SSH environment variables, and `--gemini_dir` arguments can be arranged, mock processes can overlap and independently rewrite fake files, and the existing lock and private-file helpers behave as tested. They do **not** prove that `agy` authenticates from that file, avoids Keychain, persists a refreshed token, or keeps its logs/sessions/daemon state private. No real authentication, credential reads, or Keychain mutation were attempted.
 
 ## Evidence and gap
