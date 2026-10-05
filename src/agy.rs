@@ -296,6 +296,59 @@ pub fn run_command_captured_interruptibly_with_timeout(
     })
 }
 
+pub fn run_command_isolated_with_interrupt(
+    cmd: &mut Command,
+    interrupted: impl Fn() -> bool,
+) -> Result<ExitStatus, String> {
+    use std::os::unix::process::CommandExt;
+    // Separate group ensures sudo, launchctl and agy share a termination target.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setpgid(0, 0) == -1 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+    cmd.stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to execute agy: {e}"))?;
+    let group = child.id() as i32;
+    loop {
+        if interrupted() {
+            unsafe {
+                libc::kill(-group, libc::SIGTERM);
+            }
+            let until = std::time::Instant::now() + Duration::from_millis(500);
+            // Keep leader unreaped so group ID cannot be recycled before teardown.
+            while std::time::Instant::now() < until {
+                if unsafe { libc::kill(-group, 0) } == -1 {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            if unsafe { libc::kill(-group, 0) } == 0 {
+                unsafe {
+                    libc::kill(-group, libc::SIGKILL);
+                }
+            }
+            child.wait().map_err(|e| e.to_string())?;
+            return Err("Interrupted while isolated AGY was running".into());
+        }
+        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            return Ok(status);
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+pub fn run_command_isolated_interruptibly(cmd: &mut Command) -> Result<ExitStatus, String> {
+    run_command_isolated_with_interrupt(cmd, crate::security::ProcessLock::interrupted)
+}
+
 pub fn run_command_interruptibly(cmd: &mut Command) -> Result<ExitStatus, String> {
     cmd.stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
@@ -317,5 +370,33 @@ pub fn run_command_interruptibly(cmd: &mut Command) -> Result<ExitStatus, String
             Some(status) => return Ok(status),
             None => thread::sleep(Duration::from_millis(100)),
         }
+    }
+}
+
+#[cfg(test)]
+mod isolated_regression {
+    use super::*;
+    #[test]
+    fn interrupt_reaps_process_group_descendants() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("survivor");
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg("(sleep 2; touch \"$1\") & wait")
+            .arg("sh")
+            .arg(&marker);
+        let interrupted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = interrupted.clone();
+        let signal = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let result = run_command_isolated_with_interrupt(&mut cmd, || {
+            interrupted.load(std::sync::atomic::Ordering::SeqCst)
+        });
+        signal.join().unwrap();
+        assert!(result.is_err());
+        std::thread::sleep(Duration::from_secs(3));
+        assert!(!marker.exists(), "descendant survived interruption");
     }
 }

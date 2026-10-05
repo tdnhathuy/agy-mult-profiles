@@ -122,6 +122,62 @@ pub fn validate_binding(
     }
     Ok(())
 }
+
+// Lock order: registry -> isolated profile locks (sorted). Exec releases registry
+// after acquiring its profile lock and reading a fresh snapshot. No code holding
+// a profile lock may reacquire registry. Writers hold both until save completes.
+pub fn registry_lock(path: &Path) -> Result<crate::security::ProcessLock, String> {
+    crate::security::ProcessLock::acquire(
+        &path
+            .parent()
+            .ok_or("Invalid registry path")?
+            .join("agyp-registry.lock"),
+    )
+}
+pub fn isolated_exec_lock(dir: &Path, name: &str) -> Result<crate::security::ProcessLock, String> {
+    crate::security::validate_component(name, "profile name")?;
+    crate::security::ProcessLock::acquire(&dir.join(format!("isolated-{name}.lock")))
+}
+pub fn registry_update<T>(
+    path: &Path,
+    f: impl FnOnce(&mut ProfileRegistry) -> Result<T, String>,
+) -> Result<T, String> {
+    let _registry = registry_lock(path)?;
+    let mut r = ProfileRegistry::load_or_default(path)?;
+    // All isolated execution locks are held through the read/modify/write. This
+    // prevents a changed alias/default/binding from rerouting active execution.
+    let mut names: Vec<_> = r.profiles.keys().cloned().collect();
+    names.extend(r.isolated.keys().cloned());
+    names.sort();
+    names.dedup();
+    let _active: Vec<_> = names
+        .iter()
+        .map(|n| isolated_exec_lock(path.parent().unwrap(), n))
+        .collect::<Result<_, _>>()?;
+    let value = f(&mut r)?;
+    r.save(path)?;
+    Ok(value)
+}
+
+pub fn select_trusted_binary<'a>(
+    paths: impl IntoIterator<Item = &'a Path>,
+) -> Result<PathBuf, String> {
+    paths
+        .into_iter()
+        .find_map(|p| check_binary(p).ok())
+        .ok_or_else(|| "No root-owned, non-writable agy binary found".into())
+}
+pub fn trusted_agy_binary() -> Result<PathBuf, String> {
+    let mut paths: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|p| std::env::split_paths(&p).map(|d| d.join("agy")).collect())
+        .unwrap_or_default();
+    paths.extend([
+        PathBuf::from("/opt/homebrew/bin/agy"),
+        PathBuf::from("/usr/local/bin/agy"),
+    ]);
+    select_trusted_binary(paths.iter().map(PathBuf::as_path))
+}
+
 pub fn check_binary(path: &Path) -> Result<PathBuf, String> {
     if !path.is_absolute() {
         return Err("agy binary must be absolute".into());
@@ -172,30 +228,25 @@ pub fn isolated_command(b: &Binding, binary: &Path, args: &[String]) -> Result<C
 }
 pub fn bind(profile: &str, user: &str) -> Result<(), String> {
     let path = ProfileRegistry::get_config_file_path();
-    let _lock = crate::security::ProcessLock::acquire(
-        &ProfileRegistry::get_profiles_dir().join("agyp-isolation-config.lock"),
-    )?;
-    let mut r = ProfileRegistry::load_or_default(&path)?;
     let id = lookup(user)?;
-    let b = Binding {
-        user: id.user.clone(),
-        uid: id.uid,
-        home: id.home.clone(),
-    };
-    validate_binding(&r, profile, &b, &id, unsafe { libc::getuid() })?;
-    r.isolated.insert(profile.into(), b);
-    r.save(&path)
+    registry_update(&path, |r| {
+        let b = Binding {
+            user: id.user.clone(),
+            uid: id.uid,
+            home: id.home.clone(),
+        };
+        validate_binding(r, profile, &b, &id, unsafe { libc::getuid() })?;
+        r.isolated.insert(profile.into(), b);
+        Ok(())
+    })
 }
 pub fn unbind(profile: &str) -> Result<(), String> {
-    let path = ProfileRegistry::get_config_file_path();
-    let _lock = crate::security::ProcessLock::acquire(
-        &ProfileRegistry::get_profiles_dir().join("agyp-isolation-config.lock"),
-    )?;
-    let mut r = ProfileRegistry::load_or_default(&path)?;
-    if r.isolated.remove(profile).is_none() {
-        return Err("Profile not bound".into());
-    }
-    r.save(&path)
+    registry_update(&ProfileRegistry::get_config_file_path(), |r| {
+        if r.isolated.remove(profile).is_none() {
+            return Err("Profile not bound".into());
+        }
+        Ok(())
+    })
 }
 pub fn status(profile: Option<&str>) -> Result<(), String> {
     let r = ProfileRegistry::load_or_default(&ProfileRegistry::get_config_file_path())?;
@@ -229,4 +280,56 @@ pub fn gui_session(uid: u32) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod regression_tests {
+    use super::*;
+    #[test]
+    fn skips_untrusted_path_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let bad = dir.path().join("agy");
+        std::fs::write(&bad, "bad").unwrap();
+        let selected = select_trusted_binary([bad.as_path(), std::path::Path::new("/bin/sh")]);
+        assert_eq!(selected.unwrap(), std::path::PathBuf::from("/bin/sh"));
+    }
+
+    #[test]
+    fn registry_writer_waits_for_isolated_exec_and_preserves_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registry.json");
+        registry_update(&path, |r| {
+            r.isolated.insert(
+                "one".into(),
+                Binding {
+                    user: "test".into(),
+                    uid: 501,
+                    home: PathBuf::from("/Users/test"),
+                },
+            );
+            Ok(())
+        })
+        .unwrap();
+        let execution = isolated_exec_lock(dir.path(), "one").unwrap();
+        let handle = std::thread::spawn({
+            let path = path.clone();
+            move || {
+                registry_update(&path, |r| {
+                    r.default_profile = Some("two".into());
+                    Ok(())
+                })
+            }
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(!handle.is_finished());
+        drop(execution);
+        handle.join().unwrap().unwrap();
+        assert_eq!(
+            ProfileRegistry::load_or_default(&path)
+                .unwrap()
+                .default_profile
+                .as_deref(),
+            Some("two")
+        );
+    }
 }

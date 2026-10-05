@@ -14,10 +14,6 @@ pub fn cmd_login(name: &str, import_current: bool) -> Result<(), i32> {
         1
     })?;
     let config_path = ProfileRegistry::get_config_file_path();
-    let mut reg = ProfileRegistry::load_or_default(&config_path).map_err(|e| {
-        eprintln!("Error: {}", e);
-        1
-    })?;
     let lock_path = ProfileRegistry::get_profiles_dir().join("agyp.lock");
     let _process_lock = crate::security::ProcessLock::acquire(&lock_path).map_err(|e| {
         eprintln!("Failed to serialize AGY profile access: {e}");
@@ -157,17 +153,15 @@ pub fn cmd_login(name: &str, import_current: bool) -> Result<(), i32> {
         last_used_at: None,
     };
 
-    reg.add_profile(info).map_err(|e| {
-        eprintln!("Error: {}", e);
-        1
-    })?;
-
-    if reg.default_profile.is_none() {
-        reg.default_profile = Some(name.to_string());
-    }
-
-    reg.save(&config_path).map_err(|e| {
-        eprintln!("Error saving registry: {}", e);
+    crate::isolate::registry_update(&config_path, |reg| {
+        reg.add_profile(info)?;
+        if reg.default_profile.is_none() {
+            reg.default_profile = Some(name.to_string());
+        }
+        Ok(())
+    })
+    .map_err(|e| {
+        eprintln!("Error saving registry: {e}");
         1
     })?;
 
@@ -242,24 +236,27 @@ pub fn cmd_default(profile_arg: Option<&str>) -> Result<(), i32> {
         })?;
     }
     let config_path = ProfileRegistry::get_config_file_path();
-    let mut reg = ProfileRegistry::load_or_default(&config_path).map_err(|e| {
+    let reg = ProfileRegistry::load_or_default(&config_path).map_err(|e| {
         eprintln!("Error: {}", e);
         1
     })?;
 
     match profile_arg {
         Some(target) => {
-            let prof_dir = reg.resolve_profile(target).map(|p| p.dir.clone());
-            reg.set_default_profile(target).map_err(|e| {
-                eprintln!("Error: {}", e);
-                1
-            })?;
-            reg.save(&config_path).map_err(|e| {
-                eprintln!("Error saving registry: {}", e);
+            let (prof_dir, isolated) = crate::isolate::registry_update(&config_path, |reg| {
+                let dir = reg.resolve_profile(target).map(|p| p.dir.clone());
+                let isolated = reg
+                    .resolve_profile(target)
+                    .is_some_and(|p| reg.isolated.contains_key(&p.name));
+                reg.set_default_profile(target)?;
+                Ok((dir, isolated))
+            })
+            .map_err(|e| {
+                eprintln!("Error saving registry: {e}");
                 1
             })?;
 
-            if let Some(dir) = prof_dir {
+            if let Some(dir) = prof_dir.filter(|_| !isolated) {
                 let _ = crate::keychain::activate_profile_token(&dir);
             }
 
@@ -282,7 +279,7 @@ pub fn cmd_rm(name: &str, yes: bool) -> Result<(), i32> {
         1
     })?;
     let config_path = ProfileRegistry::get_config_file_path();
-    let mut reg = ProfileRegistry::load_or_default(&config_path).map_err(|e| {
+    let reg = ProfileRegistry::load_or_default(&config_path).map_err(|e| {
         eprintln!("Error: {}", e);
         1
     })?;
@@ -313,16 +310,20 @@ pub fn cmd_rm(name: &str, yes: bool) -> Result<(), i32> {
         eprintln!("Refusing to delete unsafe profile path: {e}");
         1
     })?;
-    fs::remove_dir_all(&safe_profile_dir).map_err(|e| {
-        eprintln!("Failed to delete profile directory: {e}");
-        1
-    })?;
-    reg.remove_profile(&profile.name).map_err(|e| {
-        eprintln!("Error: {}", e);
-        1
-    })?;
-    reg.save(&config_path).map_err(|e| {
-        eprintln!("Error saving registry: {}", e);
+    crate::isolate::registry_update(&config_path, |reg| {
+        // Recheck after user confirmation while holding registry and execution locks.
+        let current = reg
+            .resolve_profile(name)
+            .ok_or("Profile no longer exists")?;
+        if current.dir != profile.dir {
+            return Err("Profile changed during confirmation".into());
+        }
+        fs::remove_dir_all(&safe_profile_dir)
+            .map_err(|e| format!("Failed to delete profile directory: {e}"))?;
+        reg.remove_profile(&profile.name)
+    })
+    .map_err(|e| {
+        eprintln!("Error deleting profile: {e}");
         1
     })?;
 
