@@ -39,7 +39,7 @@ pub fn cmd_prompt(
     json_output: bool,
 ) -> Result<(), i32> {
     let config_path = ProfileRegistry::get_config_file_path();
-    let mut reg = match ProfileRegistry::load_or_default(&config_path) {
+    let reg = match ProfileRegistry::load_or_default(&config_path) {
         Ok(r) => r,
         Err(e) => {
             let target = profile_arg.unwrap_or("unknown");
@@ -134,10 +134,12 @@ pub fn cmd_prompt(
     args.push(prompt_content);
 
     // Update last_used_at
-    if let Some(p) = reg.profiles.get_mut(&profile.name) {
-        p.last_used_at = Some(Utc::now());
-    }
-    let _ = reg.save(&config_path);
+    let _ = ProfileRegistry::update(&config_path, |reg| {
+        if let Some(p) = reg.profiles.get_mut(&profile.name) {
+            p.last_used_at = Some(Utc::now());
+        }
+        Ok(())
+    });
 
     let mut cmd = match build_agy_command(&profile.dir, &args) {
         Ok(c) => c,

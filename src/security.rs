@@ -160,6 +160,51 @@ impl Drop for ProcessLock {
     }
 }
 
+/// Short-lived exclusive file lock for shared state files (registry, quota cache). Unlike
+/// `ProcessLock` it installs no signal handlers and never resets the interrupt flag.
+pub struct FileLock {
+    file: File,
+}
+
+impl FileLock {
+    pub fn acquire_with_timeout(path: &Path, timeout: Duration) -> Result<Self, String> {
+        if let Some(parent) = path.parent() {
+            secure_dir(parent).map_err(|e| format!("Failed to secure lock directory: {e}"))?;
+        }
+        reject_symlink(path).map_err(|e| format!("Refusing unsafe lock file: {e}"))?;
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)
+            .map_err(|e| format!("Failed to open lock file: {e}"))?;
+        set_private_file_permissions(path)
+            .map_err(|e| format!("Failed to secure lock file: {e}"))?;
+        let start = std::time::Instant::now();
+        loop {
+            match file.try_lock_exclusive() {
+                Ok(()) => return Ok(Self { file }),
+                Err(err)
+                    if err.kind() == io::ErrorKind::WouldBlock
+                        || err.raw_os_error() == Some(libc::EWOULDBLOCK)
+                        || err.raw_os_error() == Some(libc::EAGAIN) => {}
+                Err(err) => return Err(format!("Failed to acquire lock: {err}")),
+            }
+            if start.elapsed() >= timeout {
+                return Err(format!("Timed out waiting for lock after {:?}", timeout));
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
 pub fn secure_dir(path: &Path) -> io::Result<()> {
     fs::create_dir_all(path)?;
     #[cfg(unix)]

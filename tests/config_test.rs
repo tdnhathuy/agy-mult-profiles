@@ -143,3 +143,37 @@ fn test_atomic_persistence_cleans_up_tmp() {
         .join(format!("profiles.json.tmp.{}", std::process::id()));
     assert!(!tmp_path.exists(), "Temp file should be renamed/removed");
 }
+
+#[test]
+fn test_registry_update_does_not_lose_concurrent_changes() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("profiles.json");
+
+    let handles: Vec<_> = (0..16)
+        .map(|i| {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                ProfileRegistry::update(&path, |reg| {
+                    let loaded = reg.profiles.len();
+                    // Widen the read-modify-write window so unsynchronized writers would collide.
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    reg.add_profile(ProfileInfo {
+                        name: format!("p{i}"),
+                        email: format!("p{i}@example.com"),
+                        dir: PathBuf::from(format!("/tmp/p{i}")),
+                        created_at: chrono::Utc::now(),
+                        last_used_at: None,
+                    })?;
+                    Ok(loaded)
+                })
+                .unwrap()
+            })
+        })
+        .collect();
+    for handle in handles {
+        handle.join().unwrap();
+    }
+
+    let reg = ProfileRegistry::load_or_default(&path).unwrap();
+    assert_eq!(reg.profiles.len(), 16);
+}

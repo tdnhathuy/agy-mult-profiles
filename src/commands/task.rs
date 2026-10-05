@@ -798,7 +798,7 @@ fn execute_task_impl<B: crate::keychain::KeychainBackend>(
     };
 
     let config_path = ProfileRegistry::get_config_file_path();
-    let mut reg = match ProfileRegistry::load_or_default(&config_path) {
+    let reg = match ProfileRegistry::load_or_default(&config_path) {
         Ok(r) => r,
         Err(e) => {
             return make_setup_error_output(
@@ -916,10 +916,12 @@ fn execute_task_impl<B: crate::keychain::KeychainBackend>(
     args.push("-p".to_string());
     args.push(prompt_content);
 
-    if let Some(p) = reg.profiles.get_mut(&profile.name) {
-        p.last_used_at = Some(chrono::Utc::now());
-    }
-    let _ = reg.save(&config_path);
+    let _ = ProfileRegistry::update(&config_path, |reg| {
+        if let Some(p) = reg.profiles.get_mut(&profile.name) {
+            p.last_used_at = Some(chrono::Utc::now());
+        }
+        Ok(())
+    });
 
     let mut cmd = match build_agy_command(&profile.dir, &args) {
         Ok(c) => c,

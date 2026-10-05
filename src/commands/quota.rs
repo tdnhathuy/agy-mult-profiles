@@ -464,7 +464,8 @@ fn merge_quota_cache_updates(
     updates: Vec<CachedQuotaEntry>,
 ) -> Result<(), String> {
     let lock_path = cache_path.with_extension("lock");
-    let _cache_lock = ProcessLock::acquire_with_timeout(&lock_path, CACHE_LOCK_TIMEOUT)?;
+    let _cache_lock =
+        crate::security::FileLock::acquire_with_timeout(&lock_path, CACHE_LOCK_TIMEOUT)?;
     let mut cache = load_quota_cache(cache_path);
     for entry in updates {
         cache.entries.insert(entry.profile.clone(), entry);

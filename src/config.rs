@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+const REGISTRY_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProfileInfo {
@@ -103,6 +106,22 @@ impl ProfileRegistry {
         }
 
         Ok(())
+    }
+
+    /// Reloads the registry under an exclusive lock, applies `change`, and saves it, so parallel
+    /// agyp processes never overwrite each other's registry updates with a stale copy.
+    pub fn update<T>(
+        path: &Path,
+        change: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let _lock = crate::security::FileLock::acquire_with_timeout(
+            &path.with_extension("lock"),
+            REGISTRY_LOCK_TIMEOUT,
+        )?;
+        let mut registry = Self::load_or_default(path)?;
+        let value = change(&mut registry)?;
+        registry.save(path)?;
+        Ok(value)
     }
 
     pub fn resolve_profile(&self, name_or_alias: &str) -> Option<&ProfileInfo> {

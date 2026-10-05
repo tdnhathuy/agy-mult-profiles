@@ -16,10 +16,6 @@ pub fn cmd_login(name: &str, import_current: bool) -> Result<(), i32> {
         1
     })?;
     let config_path = ProfileRegistry::get_config_file_path();
-    let mut reg = ProfileRegistry::load_or_default(&config_path).map_err(|e| {
-        eprintln!("Error: {}", e);
-        1
-    })?;
     let lock_path = crate::security::profile_lock_path(&ProfileRegistry::get_profiles_dir(), name);
     let _process_lock = crate::security::ProcessLock::acquire(&lock_path).map_err(|e| {
         eprintln!("Failed to serialize AGY profile access: {e}");
@@ -151,16 +147,14 @@ pub fn cmd_login(name: &str, import_current: bool) -> Result<(), i32> {
         last_used_at: None,
     };
 
-    reg.add_profile(info).map_err(|e| {
-        eprintln!("Error: {}", e);
-        1
-    })?;
-
-    if reg.default_profile.is_none() {
-        reg.default_profile = Some(name.to_string());
-    }
-
-    reg.save(&config_path).map_err(|e| {
+    ProfileRegistry::update(&config_path, |reg| {
+        reg.add_profile(info)?;
+        if reg.default_profile.is_none() {
+            reg.default_profile = Some(name.to_string());
+        }
+        Ok(())
+    })
+    .map_err(|e| {
         eprintln!("Error saving registry: {}", e);
         1
     })?;
@@ -236,20 +230,15 @@ pub fn cmd_default(profile_arg: Option<&str>) -> Result<(), i32> {
         })?;
     }
     let config_path = ProfileRegistry::get_config_file_path();
-    let mut reg = ProfileRegistry::load_or_default(&config_path).map_err(|e| {
-        eprintln!("Error: {}", e);
-        1
-    })?;
-
     match profile_arg {
         Some(target) => {
-            let prof_dir = reg.resolve_profile(target).map(|p| p.dir.clone());
-            reg.set_default_profile(target).map_err(|e| {
+            let prof_dir = ProfileRegistry::update(&config_path, |reg| {
+                let prof_dir = reg.resolve_profile(target).map(|p| p.dir.clone());
+                reg.set_default_profile(target)?;
+                Ok(prof_dir)
+            })
+            .map_err(|e| {
                 eprintln!("Error: {}", e);
-                1
-            })?;
-            reg.save(&config_path).map_err(|e| {
-                eprintln!("Error saving registry: {}", e);
                 1
             })?;
 
@@ -261,6 +250,10 @@ pub fn cmd_default(profile_arg: Option<&str>) -> Result<(), i32> {
             Ok(())
         }
         None => {
+            let reg = ProfileRegistry::load_or_default(&config_path).map_err(|e| {
+                eprintln!("Error: {}", e);
+                1
+            })?;
             match &reg.default_profile {
                 Some(def) => println!("{}", def),
                 None => println!("No default profile configured."),
@@ -276,7 +269,7 @@ pub fn cmd_rm(name: &str, yes: bool) -> Result<(), i32> {
         1
     })?;
     let config_path = ProfileRegistry::get_config_file_path();
-    let mut reg = ProfileRegistry::load_or_default(&config_path).map_err(|e| {
+    let reg = ProfileRegistry::load_or_default(&config_path).map_err(|e| {
         eprintln!("Error: {}", e);
         1
     })?;
@@ -326,14 +319,12 @@ pub fn cmd_rm(name: &str, yes: bool) -> Result<(), i32> {
         eprintln!("Failed to delete profile directory: {e}");
         1
     })?;
-    reg.remove_profile(&profile.name).map_err(|e| {
-        eprintln!("Error: {}", e);
-        1
-    })?;
-    reg.save(&config_path).map_err(|e| {
-        eprintln!("Error saving registry: {}", e);
-        1
-    })?;
+    ProfileRegistry::update(&config_path, |reg| reg.remove_profile(&profile.name)).map_err(
+        |e| {
+            eprintln!("Error saving registry: {}", e);
+            1
+        },
+    )?;
 
     println!("Profile '{}' deleted.", profile.name);
     Ok(())

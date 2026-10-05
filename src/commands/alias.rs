@@ -14,20 +14,12 @@ pub fn cmd_alias_set(alias: &str, profile_name: &str) -> Result<(), i32> {
         1
     })?;
     let config_path = ProfileRegistry::get_config_file_path();
-    let mut reg = ProfileRegistry::load_or_default(&config_path).map_err(|e| {
-        eprintln!("Error: {}", e);
-        1
-    })?;
-
-    reg.set_alias(alias, profile_name).map_err(|e| {
-        eprintln!("Error: {}", e);
-        1
-    })?;
-
-    reg.save(&config_path).map_err(|e| {
-        eprintln!("Error: {}", e);
-        1
-    })?;
+    ProfileRegistry::update(&config_path, |reg| reg.set_alias(alias, profile_name)).map_err(
+        |e| {
+            eprintln!("Error: {}", e);
+            1
+        },
+    )?;
 
     println!("Alias '{}' -> '{}' set successfully.", alias, profile_name);
     Ok(())
@@ -39,17 +31,7 @@ pub fn cmd_alias_rm(alias: &str) -> Result<(), i32> {
         1
     })?;
     let config_path = ProfileRegistry::get_config_file_path();
-    let mut reg = ProfileRegistry::load_or_default(&config_path).map_err(|e| {
-        eprintln!("Error: {}", e);
-        1
-    })?;
-
-    reg.remove_alias(alias).map_err(|e| {
-        eprintln!("Error: {}", e);
-        1
-    })?;
-
-    reg.save(&config_path).map_err(|e| {
+    ProfileRegistry::update(&config_path, |reg| reg.remove_alias(alias)).map_err(|e| {
         eprintln!("Error: {}", e);
         1
     })?;
