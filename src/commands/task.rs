@@ -954,8 +954,7 @@ fn execute_task_impl<B: crate::keychain::KeychainBackend>(
 
     let lock_path =
         crate::security::profile_lock_path(&ProfileRegistry::get_profiles_dir(), &profile.name);
-    let _process_lock = match ProcessLock::acquire_with_timeout(&lock_path, remaining_lock_timeout)
-    {
+    let process_lock = match ProcessLock::acquire_with_timeout(&lock_path, remaining_lock_timeout) {
         Ok(l) => l,
         Err(e) if e.contains("Timed out") => {
             return make_timeout_error_output(
@@ -1001,6 +1000,7 @@ fn execute_task_impl<B: crate::keychain::KeychainBackend>(
         &profile_dir,
         backend,
         std::time::Instant::now() + PROFILE_KEYCHAIN_SETUP_TIMEOUT,
+        process_lock,
     ) {
         Ok((g, profile_home)) => {
             apply_profile_home(&mut cmd, profile_home.as_deref());

@@ -167,7 +167,7 @@ Rules for Hermes:
   - `Library/Keychains/login.keychain-db`: Keychain riêng của profile (mật khẩu ngẫu nhiên lưu trong `profiles/<name>/keychain_password`, không auto-lock).
   - Các mục còn lại của HOME thật (`.gitconfig`, `.ssh`, `.config`, `.gemini`, `Library/*`, ...) được symlink để git/npm/... trong task vẫn hoạt động. Riêng `Library/Keychains` và `Library/Preferences` là thư mục riêng.
   - Trước mỗi lần chạy, `agyp` kiểm tra search list/default Keychain dưới HOME riêng chỉ trỏ vào Keychain của profile; nếu không thì từ chối chạy.
-- Khi thực thi (`task` / `prompt` / `exec` / `quota` / `q`), `agyp` dùng **RAII `KeychainGuard`** trên Keychain riêng của profile: nạp token → chạy `agy` với `HOME=<homes/name>` → lưu token đã refresh về `keychain_token.json` → dọn Keychain riêng. Keychain hệ thống **không bị đụng tới**.
-- Lock theo profile (`~/.gemini-profiles/locks/<name>.lock`): **các profile khác nhau chạy song song**, cùng một profile thì chạy tuần tự.
-- `agyp login <name>` chạy OAuth bên trong HOME riêng của profile nên không cần xóa/khôi phục Keychain hệ thống.
+- Keychain riêng là nơi lưu token chính của profile: lần chạy đầu nạp từ `keychain_token.json`, sau đó `agy` refresh token ngay trong Keychain riêng, và `agyp` sao lưu lại vào `keychain_token.json` sau mỗi lần chạy. Keychain hệ thống **không bị đụng tới**.
+- Lock theo profile (`~/.gemini-profiles/locks/<name>.lock`) chỉ giữ vài giây lúc chuẩn bị Keychain, nên **nhiều phiên chạy song song được, kể cả trên cùng một profile**. Nếu profile đang bận, `agyp` báo `... is in use by another agyp command; waiting...`.
+- `agyp login <name>` chạy OAuth bên trong HOME riêng của profile. Ngay khi OAuth xong, profile được ghi vào registry (hiện trong `agyp ls`) và dùng được luôn, dù phiên `agy` của login vẫn đang mở.
 - Lưu ý: tool trong task dùng macOS Keychain (vd. `gh` lưu token trong Keychain, git HTTPS qua `osxkeychain`) sẽ không thấy credential của login Keychain thật. Dùng SSH cho git hoặc `GH_TOKEN` cho `gh`.

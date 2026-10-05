@@ -192,13 +192,14 @@ fn run_usage_for_profile(
         return Err("Interrupted.".to_string());
     }
     let lock_path = profile_lock_path(&ProfileRegistry::get_profiles_dir(), &canonical);
-    let _lock = ProcessLock::acquire_with_timeout(&lock_path, LOCK_TIMEOUT)?;
+    let lock = ProcessLock::acquire_with_timeout(&lock_path, LOCK_TIMEOUT)?;
 
     let deadline = Instant::now() + DEFAULT_USAGE_TIMEOUT;
     let (keychain_guard, profile_home) = activate_profile(
         &validated_profile_dir,
         crate::keychain::SystemKeychainBackend,
         deadline,
+        lock,
     )?;
 
     let mut command = Command::new(agy_binary);

@@ -29,7 +29,7 @@ Use `agyp` to delegate implementation to AGY while Hermes/SOL owns planning, rev
 4. Never omit the profile, use implicit defaults, round-robin, or automatically switch after `429`.
 5. For coding, create or select an isolated Git worktree. Verify its branch and clean/known status before execution.
 
-Each profile runs AGY with its own isolated HOME and private macOS Keychain, so sessions on **different profiles run in parallel**. Calls on the **same profile** are serialized by a per-profile lock and may queue.
+Each profile runs AGY with its own isolated HOME and private macOS Keychain, so sessions run in parallel, **including several sessions on the same profile**. A per-profile lock is held only for a few seconds while the Keychain is prepared.
 
 ## Invocation
 

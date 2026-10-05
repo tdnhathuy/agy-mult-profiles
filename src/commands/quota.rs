@@ -717,7 +717,7 @@ pub fn execute_quota_impl<B: KeychainBackend + Clone, R: QuotaProbeRunner>(
         let transaction_deadline = start_instant + timeout_duration;
         let remaining_lock_timeout = transaction_deadline.saturating_duration_since(Instant::now());
         let lock_path = profile_lock_path(&ProfileRegistry::get_profiles_dir(), &profile.name);
-        let _profile_lock =
+        let profile_lock =
             match ProcessLock::acquire_with_timeout(&lock_path, remaining_lock_timeout) {
                 Ok(l) => l,
                 Err(e) => {
@@ -753,6 +753,7 @@ pub fn execute_quota_impl<B: KeychainBackend + Clone, R: QuotaProbeRunner>(
             &validated_profile_dir,
             backend.clone(),
             transaction_deadline,
+            profile_lock,
         ) {
             Ok(activated) => activated,
             Err(e) => {

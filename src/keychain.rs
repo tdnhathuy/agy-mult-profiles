@@ -761,26 +761,86 @@ impl<B: KeychainBackend> KeychainBackend for ProfileKeychain<B> {
     }
 }
 
-/// Activates a profile's credential for one AGY run. Returns the guard plus the `HOME` the AGY
-/// process must be started with (`None` when the backend does not isolate profiles).
-/// Must be called while holding the profile lock.
+/// Activates a profile's credential for one AGY run, taking ownership of the profile `lock`.
+/// Returns the guard plus the `HOME` the AGY process must be started with (`None` when the
+/// backend does not isolate profiles).
+///
+/// With a shared backend the lock is held until the guard is dropped, because the shared
+/// Keychain can hold only one profile at a time. With an isolated Keychain the lock is released
+/// once the Keychain is ready, so further runs of the same profile can start concurrently.
 pub fn activate_profile<B: KeychainBackend>(
     profile_dir: &Path,
     backend: B,
     deadline: Instant,
+    lock: crate::security::ProcessLock,
 ) -> Result<(KeychainGuard<ProfileKeychain<B>>, Option<PathBuf>), String> {
-    let (scoped, home) = if backend.isolates_profiles() {
-        let isolated = prepare_isolated_home(profile_dir, deadline)
-            .map_err(|e| format!("Failed to prepare isolated profile Keychain: {e}"))?;
-        (
-            ProfileKeychain::Isolated(isolated.backend()),
-            Some(isolated.home),
+    if !backend.isolates_profiles() {
+        let mut guard = KeychainGuard::new_with_backend_until(
+            profile_dir,
+            ProfileKeychain::Shared(backend),
+            deadline,
+        )?;
+        guard._process_lock = Some(lock);
+        return Ok((guard, None));
+    }
+    let isolated = prepare_isolated_home(profile_dir, deadline)
+        .map_err(|e| format!("Failed to prepare isolated profile Keychain: {e}"))?;
+    let home = isolated.home.clone();
+    let guard = activate_isolated_profile(profile_dir, &isolated, deadline, lock)?;
+    Ok((guard, Some(home)))
+}
+
+/// Seeds the isolated Keychain from `keychain_token.json` only when it holds no token: once
+/// populated, it carries AGY's latest refresh and is shared by every run of the profile.
+pub fn activate_isolated_profile<B: KeychainBackend>(
+    profile_dir: &Path,
+    isolated: &IsolatedProfileHome,
+    deadline: Instant,
+    lock: crate::security::ProcessLock,
+) -> Result<KeychainGuard<ProfileKeychain<B>>, String> {
+    let profile_token = load_token_from_profile(profile_dir).ok_or_else(|| {
+        format!(
+            "No saved Keychain token in profile directory {}",
+            profile_dir.display()
         )
-    } else {
-        (ProfileKeychain::Shared(backend), None)
+    })?;
+    let backend = isolated.backend();
+    let current = backend
+        .read_token_until(deadline)
+        .map_err(|e| format!("Failed to read profile Keychain: {e}"))?;
+    if current.is_none() {
+        backend
+            .write_token_until(&profile_token, deadline)
+            .map_err(|e| format!("Failed to activate profile Keychain token: {e}"))?;
+    }
+    if crate::security::ProcessLock::interrupted() {
+        return Err("Interrupted while activating the profile".to_string());
+    }
+    let session = IsolatedSession {
+        lock_path: lock.path().to_path_buf(),
+        // Installed before the lock (and its own handlers) is released, so signals stay routed.
+        _signals: crate::security::SignalGuard::install()?,
     };
-    let guard = KeychainGuard::new_with_backend_until(profile_dir, scoped, deadline)?;
-    Ok((guard, home))
+    drop(lock);
+    Ok(KeychainGuard {
+        backend: ProfileKeychain::Isolated(backend),
+        saved_system_token: None,
+        target_profile_dir: Some(profile_dir.to_path_buf()),
+        persistence_attempted: false,
+        isolated: Some(session),
+        _process_lock: None,
+    })
+}
+
+/// Drops any token in the profile's isolated Keychain so the next run re-seeds it from
+/// `keychain_token.json`. Call after replacing that file outside an AGY run (e.g. an import).
+pub fn invalidate_isolated_token(profile_dir: &Path, deadline: Instant) -> Result<(), String> {
+    if !isolated_home_dir(profile_dir)?.exists() {
+        return Ok(());
+    }
+    prepare_isolated_home(profile_dir, deadline)?
+        .backend()
+        .delete_token_until(deadline)
 }
 
 /// Points an AGY command at the profile's isolated HOME, if any.
@@ -897,6 +957,17 @@ pub struct KeychainGuard<B: KeychainBackend = SystemKeychainBackend> {
     saved_system_token: Option<String>,
     target_profile_dir: Option<PathBuf>,
     persistence_attempted: bool,
+    /// Set for a profile's own isolated Keychain, which other runs of the same profile share.
+    isolated: Option<IsolatedSession>,
+    /// Held for the whole run when credentials are swapped through a shared Keychain.
+    _process_lock: Option<crate::security::ProcessLock>,
+}
+
+/// An isolated Keychain is the profile's persistent credential store: nothing is restored on
+/// exit, and the refreshed token is mirrored to `keychain_token.json` under the profile lock.
+struct IsolatedSession {
+    lock_path: PathBuf,
+    _signals: crate::security::SignalGuard,
 }
 
 impl<B: KeychainBackend> KeychainGuard<B> {
@@ -921,6 +992,8 @@ impl<B: KeychainBackend> KeychainGuard<B> {
             saved_system_token: current_system_token,
             target_profile_dir: Some(target_profile_dir.to_path_buf()),
             persistence_attempted: false,
+            isolated: None,
+            _process_lock: None,
         };
 
         if let Err(activate_error) = guard.backend.write_token_until(&profile_token, deadline) {
@@ -970,6 +1043,15 @@ impl<B: KeychainBackend> KeychainGuard<B> {
         let Some(target_dir) = self.target_profile_dir.as_ref().cloned() else {
             return Ok(());
         };
+        if let Some(lock_path) = self.isolated.as_ref().map(|s| s.lock_path.clone()) {
+            self.target_profile_dir = None;
+            self.persistence_attempted = true;
+            // The isolated Keychain stays authoritative, so a failed mirror loses nothing.
+            if let Err(error) = self.mirror_isolated_token(&target_dir, &lock_path) {
+                eprintln!("Warning: failed to mirror refreshed profile token: {error}");
+            }
+            return Ok(());
+        }
 
         let persist_result = if self.persistence_attempted {
             Ok(())
@@ -1008,6 +1090,21 @@ impl<B: KeychainBackend> KeychainGuard<B> {
                 "{persist_error}; additionally failed to restore original Keychain state: {restore_error}"
             )),
         }
+    }
+
+    fn mirror_isolated_token(&self, target_dir: &Path, lock_path: &Path) -> Result<(), String> {
+        let _lock =
+            crate::security::FileLock::acquire_with_timeout(lock_path, KEYCHAIN_RESTORE_TIMEOUT)?;
+        let token = self
+            .backend
+            .read_token_until(Instant::now() + KEYCHAIN_RESTORE_TIMEOUT)?
+            .ok_or_else(|| "AGY removed the profile Keychain token".to_string())?;
+        if load_token_from_profile(target_dir).as_deref() == Some(token.trim()) {
+            return Ok(());
+        }
+        save_token_to_profile(target_dir, &token)
+            .map(|_| ())
+            .map_err(|e| format!("Failed to save profile token: {e}"))
     }
 
     fn restore_snapshot_until(&self, deadline: Instant) -> Result<(), String> {

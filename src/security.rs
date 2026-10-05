@@ -22,10 +22,11 @@ fn signal_users() -> &'static Mutex<usize> {
     SIGNAL_USERS.get_or_init(|| Mutex::new(0))
 }
 
-struct SignalGuard;
+/// Routes SIGINT/SIGTERM/SIGHUP into `ProcessLock::interrupted()` for as long as it is held.
+pub struct SignalGuard;
 
 impl SignalGuard {
-    fn install() -> Result<Self, String> {
+    pub fn install() -> Result<Self, String> {
         INTERRUPTED.store(false, Ordering::SeqCst);
         let mut users = signal_users()
             .lock()
@@ -71,6 +72,7 @@ impl Drop for SignalGuard {
 
 pub struct ProcessLock {
     file: File,
+    path: PathBuf,
     _signals: SignalGuard,
 }
 
@@ -92,8 +94,25 @@ impl ProcessLock {
             .map_err(|e| format!("Failed to acquire process lock: {e}"))?;
         Ok(Self {
             file,
+            path: path.to_path_buf(),
             _signals: SignalGuard::install()?,
         })
+    }
+
+    /// Blocks until the lock is free, calling `on_wait` once first if it is currently held.
+    pub fn acquire_announcing(path: &Path, on_wait: impl FnOnce()) -> Result<Self, String> {
+        match Self::acquire_with_timeout(path, Duration::ZERO) {
+            Ok(lock) => Ok(lock),
+            Err(e) if e.contains("Timed out") => {
+                on_wait();
+                Self::acquire(path)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     pub fn acquire_with_timeout(path: &Path, timeout: Duration) -> Result<Self, String> {
@@ -140,6 +159,7 @@ impl ProcessLock {
 
         Ok(Self {
             file,
+            path: path.to_path_buf(),
             _signals: SignalGuard::install()?,
         })
     }

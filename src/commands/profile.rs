@@ -17,7 +17,10 @@ pub fn cmd_login(name: &str, import_current: bool) -> Result<(), i32> {
     })?;
     let config_path = ProfileRegistry::get_config_file_path();
     let lock_path = crate::security::profile_lock_path(&ProfileRegistry::get_profiles_dir(), name);
-    let _process_lock = crate::security::ProcessLock::acquire(&lock_path).map_err(|e| {
+    let process_lock = crate::security::ProcessLock::acquire_announcing(&lock_path, || {
+        eprintln!("Profile '{name}' is in use by another agyp command; waiting...")
+    })
+    .map_err(|e| {
         eprintln!("Failed to serialize AGY profile access: {e}");
         1
     })?;
@@ -44,6 +47,16 @@ pub fn cmd_login(name: &str, import_current: bool) -> Result<(), i32> {
         // 1. Try importing token from system Keychain
         if let Ok(Some(token)) = crate::keychain::read_system_keychain_token() {
             let _ = crate::keychain::save_token_to_profile(&profile_dir, &token);
+            // The isolated Keychain wins over keychain_token.json once populated; drop any
+            // token from a previous account so the next run re-seeds from the imported one.
+            crate::keychain::invalidate_isolated_token(
+                &profile_dir,
+                Instant::now() + crate::keychain::PROFILE_KEYCHAIN_SETUP_TIMEOUT,
+            )
+            .map_err(|e| {
+                eprintln!("Failed to reset isolated profile Keychain: {e}");
+                1
+            })?;
         }
 
         // 2. Also copy ~/.gemini files if available
@@ -101,66 +114,158 @@ pub fn cmd_login(name: &str, import_current: bool) -> Result<(), i32> {
         let mut login_cmd = std::process::Command::new(agy_bin);
         login_cmd.arg(format!("--gemini_dir={}", profile_dir.display()));
         crate::keychain::apply_profile_home(&mut login_cmd, Some(&isolated.home));
-        let status_res = crate::agy::run_command_interruptibly(&mut login_cmd);
+        let login = run_login_session(
+            &mut login_cmd,
+            &profile_keychain,
+            &config_path,
+            name,
+            &profile_dir,
+            process_lock,
+        );
 
-        let persist_result = match profile_keychain.read_token() {
-            Ok(Some(token)) => crate::keychain::save_token_to_profile(&profile_dir, &token)
-                .map(|_| ())
-                .map_err(|e| format!("Failed to save profile credential: {e}")),
+        // AGY may update the token after OAuth (onboarding, refresh); mirror its final state.
+        match profile_keychain.read_token() {
+            Ok(Some(token)) => {
+                let _lock = crate::security::FileLock::acquire_with_timeout(
+                    &lock_path,
+                    crate::keychain::PROFILE_KEYCHAIN_SETUP_TIMEOUT,
+                );
+                if let Err(e) = crate::keychain::save_token_to_profile(&profile_dir, &token) {
+                    eprintln!("Failed to save profile credential: {e}");
+                    return Err(1);
+                }
+            }
+            Ok(None) if login.registered => {
+                eprintln!("Warning: AGY signed out after login; run 'agyp login {name}' again.");
+            }
             Ok(None) => {
-                Err("Login was cancelled or failed to authenticate with Google.".to_string())
-            }
-            Err(e) => Err(format!(
-                "Failed to read profile Keychain token after login: {e}"
-            )),
-        };
-        // keychain_token.json is the source of truth; each run re-activates it.
-        if let Err(e) = profile_keychain.delete_token() {
-            eprintln!("Warning: failed to clear profile Keychain after login: {e}");
-        }
-
-        if let Err(e) = persist_result {
-            eprintln!("{e}");
-            return Err(status_res.map(|s| s.code().unwrap_or(1)).unwrap_or(1));
-        }
-        match status_res {
-            Ok(status) if status.success() => {
-                println!("Authentication completed successfully.");
-            }
-            Ok(status) => {
-                eprintln!("AGY login exited unsuccessfully after writing credentials.");
-                return Err(status.code().unwrap_or(1));
+                eprintln!("Login was cancelled or failed to authenticate with Google.");
+                return Err(login.status.map(|s| s.code().unwrap_or(1)).unwrap_or(1));
             }
             Err(e) => {
-                eprintln!("{e}");
+                eprintln!("Failed to read profile Keychain token after login: {e}");
                 return Err(1);
             }
         }
+        match login.status {
+            Ok(_) => println!("Authentication completed successfully."),
+            // A credential was stored, so an interrupted or failed AGY exit still logged in.
+            Err(e) => eprintln!("{e}"),
+        }
     }
 
-    let email = extract_profile_email(&profile_dir).unwrap_or_else(|| "unknown".to_string());
-    let info = ProfileInfo {
-        name: name.to_string(),
-        email: email.clone(),
-        dir: profile_dir,
-        created_at: Utc::now(),
-        last_used_at: None,
-    };
-
-    ProfileRegistry::update(&config_path, |reg| {
-        reg.add_profile(info)?;
-        if reg.default_profile.is_none() {
-            reg.default_profile = Some(name.to_string());
-        }
-        Ok(())
-    })
-    .map_err(|e| {
+    let email = register_profile(&config_path, name, &profile_dir).map_err(|e| {
         eprintln!("Error saving registry: {}", e);
         1
     })?;
 
     println!("Profile '{}' ({}) configured successfully.", name, email);
     Ok(())
+}
+
+/// Adds or refreshes the profile in the registry, keeping its original creation time.
+fn register_profile(
+    config_path: &std::path::Path,
+    name: &str,
+    profile_dir: &std::path::Path,
+) -> Result<String, String> {
+    let email = extract_profile_email(profile_dir).unwrap_or_else(|| "unknown".to_string());
+    ProfileRegistry::update(config_path, |reg| {
+        let created_at = reg
+            .profiles
+            .get(name)
+            .map(|p| p.created_at)
+            .unwrap_or_else(Utc::now);
+        reg.add_profile(ProfileInfo {
+            name: name.to_string(),
+            email: email.clone(),
+            dir: profile_dir.to_path_buf(),
+            created_at,
+            last_used_at: None,
+        })?;
+        if reg.default_profile.is_none() {
+            reg.default_profile = Some(name.to_string());
+        }
+        Ok(())
+    })?;
+    Ok(email)
+}
+
+struct LoginSession {
+    status: Result<std::process::ExitStatus, String>,
+    registered: bool,
+}
+
+/// Runs the interactive AGY login. As soon as OAuth stores a token in the profile Keychain, the
+/// profile is registered and its lock released, so it shows up in `agyp ls` and other agyp
+/// commands can use it while this AGY session stays open.
+fn run_login_session(
+    cmd: &mut std::process::Command,
+    profile_keychain: &crate::keychain::IsolatedKeychainBackend,
+    config_path: &std::path::Path,
+    name: &str,
+    profile_dir: &std::path::Path,
+    process_lock: crate::security::ProcessLock,
+) -> LoginSession {
+    use std::process::Stdio;
+    use std::time::Duration;
+
+    const TOKEN_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+    let mut process_lock = Some(process_lock);
+    // Keeps signal routing alive after the profile lock is released.
+    let signals = match crate::security::SignalGuard::install() {
+        Ok(signals) => signals,
+        Err(e) => {
+            return LoginSession {
+                status: Err(e),
+                registered: false,
+            }
+        }
+    };
+    let mut child = match cmd
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => {
+            return LoginSession {
+                status: Err(format!("Failed to execute agy: {e}")),
+                registered: false,
+            }
+        }
+    };
+
+    let mut registered = false;
+    let mut last_poll: Option<Instant> = None;
+    let status = loop {
+        if crate::security::ProcessLock::interrupted() {
+            let _ = child.kill();
+            let _ = child.wait();
+            break Err("Interrupted while AGY login was running".to_string());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) => {}
+            Err(e) => break Err(format!("Failed to wait for agy: {e}")),
+        }
+        if !registered && last_poll.is_none_or(|t| t.elapsed() >= TOKEN_POLL_INTERVAL) {
+            last_poll = Some(Instant::now());
+            if let Ok(Some(token)) = profile_keychain.read_token() {
+                if crate::keychain::save_token_to_profile(profile_dir, &token).is_ok()
+                    && register_profile(config_path, name, profile_dir).is_ok()
+                {
+                    registered = true;
+                    process_lock.take();
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    drop(signals);
+    LoginSession { status, registered }
 }
 
 pub fn cmd_list(json_output: bool) -> Result<(), i32> {

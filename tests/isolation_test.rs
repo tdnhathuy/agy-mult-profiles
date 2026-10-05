@@ -10,8 +10,8 @@ mod keychain;
 mod security;
 
 use keychain::{
-    activate_profile, isolated_home_dir, prepare_isolated_home_mirroring, KeychainBackend,
-    MockKeychainBackend,
+    activate_isolated_profile, activate_profile, isolated_home_dir,
+    prepare_isolated_home_mirroring, KeychainBackend, MockKeychainBackend,
 };
 
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -329,7 +329,10 @@ fn test_activate_profile_with_non_isolating_backend_uses_no_home() {
     fs::write(fx.profile_dir.join("keychain_token.json"), "profile-token").unwrap();
     let backend = MockKeychainBackend::new(Some("system".to_string()));
 
-    let (guard, home) = activate_profile(&fx.profile_dir, backend.clone(), deadline()).unwrap();
+    let lock_path = security::profile_lock_path(fx.profile_dir.parent().unwrap(), "p1");
+    let lock = security::ProcessLock::acquire(&lock_path).unwrap();
+    let (guard, home) =
+        activate_profile(&fx.profile_dir, backend.clone(), deadline(), lock).unwrap();
     assert!(home.is_none());
     assert_eq!(
         *backend.token.lock().unwrap(),
@@ -414,5 +417,60 @@ fn test_real_security_isolated_keychain_round_trip() {
         String::from_utf8_lossy(&before),
         String::from_utf8_lossy(&list_user_keychains()),
         "the real user Keychain search list must not change"
+    );
+}
+
+#[test]
+fn test_isolated_activation_releases_lock_and_shares_profile_keychain() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let fx = Fixture::new();
+    let _path = fx.path_guard();
+    fs::write(fx.profile_dir.join("keychain_token.json"), "seed-token").unwrap();
+    let isolated =
+        prepare_isolated_home_mirroring(&fx.profile_dir, &fx.real_home, deadline()).unwrap();
+    let keychain_item = PathBuf::from(format!("{}.item", isolated.keychain.display()));
+    let lock_path = security::profile_lock_path(fx.profile_dir.parent().unwrap(), "p1");
+
+    // First run seeds the empty profile Keychain and releases the profile lock right away.
+    let first = activate_isolated_profile::<MockKeychainBackend>(
+        &fx.profile_dir,
+        &isolated,
+        deadline(),
+        security::ProcessLock::acquire(&lock_path).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(fs::read_to_string(&keychain_item).unwrap(), "seed-token");
+
+    // A second run of the same profile can start while the first is still running, and it
+    // keeps the (possibly refreshed) Keychain token instead of re-seeding the stale file.
+    fs::write(&keychain_item, "refreshed-token").unwrap();
+    let second_lock = security::ProcessLock::acquire_with_timeout(&lock_path, Duration::ZERO)
+        .expect("profile lock must be free while a run is in progress");
+    let second = activate_isolated_profile::<MockKeychainBackend>(
+        &fx.profile_dir,
+        &isolated,
+        deadline(),
+        second_lock,
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read_to_string(&keychain_item).unwrap(),
+        "refreshed-token"
+    );
+
+    // Finishing one run mirrors the token but never clears the Keychain the other still uses.
+    first.sync_and_restore().unwrap();
+    assert_eq!(
+        fs::read_to_string(&keychain_item).unwrap(),
+        "refreshed-token"
+    );
+    assert_eq!(
+        fs::read_to_string(fx.profile_dir.join("keychain_token.json")).unwrap(),
+        "refreshed-token"
+    );
+    second.sync_and_restore().unwrap();
+    assert_eq!(
+        fs::read_to_string(&keychain_item).unwrap(),
+        "refreshed-token"
     );
 }
