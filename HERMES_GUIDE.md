@@ -18,13 +18,13 @@ Use `agyp` to execute AGY prompts through one explicitly selected Google account
 1. List available profiles and linked emails:
    agyp list --json
 
-2. Quick-check detailed Gemini quota (5-hour and weekly only):
+2. Check detailed Gemini and GPT quota:
    agyp q
    agyp q <profile>
    agyp usage [<profile>] [--json]
-   Omitting `<profile>` checks every registered profile sequentially. Each result includes the profile email. Each profile has a 60-second usage transaction deadline; timed-out profiles are reported without automatic retry or profile switching. Claude/GPT rows are intentionally omitted. Reset times are formatted as `HH:MM:SS DD/MM/YYYY (GMT+7)` for Vietnam.
+   Omitting `<profile>` checks every registered profile sequentially. Each result logs profile, email, then Gemini and GPT. Each family has a 5-hour window and a 5-day window. Text shows remaining percent and time until reset. JSON fields are `gemini` and `gpt`, each with `five_hour` and `five_day` (`remaining_percent`, `reset_at`, `resets_in_seconds`). Each profile has a 60-second usage transaction deadline; timed-out profiles are reported without automatic retry or profile switching.
 
-3. Check quota status via probe (RECOMMENDED before tasks):
+3. Human-readable `agyp quota --all` / `--profile` prints the same Gemini and GPT detail as `agyp q`. Use `--json` for the probe (RECOMMENDED before tasks):
    agyp quota --profile <profile> [--timeout 30s] [--no-cache] [--json]
    agyp quota --all [--timeout 30s] [--no-cache] [--json]
    Example:
@@ -47,7 +47,7 @@ Use `agyp` to execute AGY prompts through one explicitly selected Google account
      ]
    }
    Exit codes: 0 = all available, 2 = quota_exhausted or unauthenticated, 1 = error/timeout/unknown/unsupported.
-   Note: `--timeout` is one total command deadline shared by per-profile lock acquisition and every profile in `--all`; it is not per-profile. Top-level and per-result `source` are `probe`, `cache`, `preflight`, or `mixed` according to provenance. AGY 1.2.12 exposes exact Gemini percentages and reset timestamps through `/usage`; this command surfaces those authoritative values. The separate `agyp quota` command remains an observed-health probe.
+   Note: `--timeout` is one total command deadline shared by per-profile lock acquisition and every profile in `--all`; it is not per-profile. Top-level and per-result `source` are `probe`, `cache`, `preflight`, or `mixed` according to provenance. AGY exposes Gemini and GPT 5-hour and 5-day percentages and reset timestamps through `/usage` (`agyp q`). The separate `agyp quota` command remains an observed-health probe.
 
 4. Run a delegated coding task (RECOMMENDED):
    agyp task --profile <profile> --worktree <linked-worktree-path> --prompt-file <path> [--timeout 20m] [--skip-permissions] [--json]

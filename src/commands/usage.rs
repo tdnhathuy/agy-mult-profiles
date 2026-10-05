@@ -18,13 +18,19 @@ const VIETNAM_UTC_OFFSET_SECONDS: i32 = 7 * 60 * 60;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UsageWindow {
     pub remaining_percent: u8,
-    pub reset_at: DateTime<Utc>,
+    pub reset_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ModelFamilyUsage {
+    pub five_hour: UsageWindow,
+    pub five_day: UsageWindow,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct GeminiUsage {
-    pub weekly: UsageWindow,
-    pub five_hour: UsageWindow,
+    pub gemini: ModelFamilyUsage,
+    pub gpt: ModelFamilyUsage,
 }
 
 #[derive(Debug, Clone)]
@@ -47,9 +53,9 @@ struct UsageJsonResult {
     email: String,
     status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    five_hour: Option<UsageJsonWindow>,
+    gemini: Option<UsageJsonFamily>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    weekly: Option<UsageJsonWindow>,
+    gpt: Option<UsageJsonFamily>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
@@ -63,25 +69,64 @@ struct UsageJsonOutput {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct UsageJsonFamily {
+    five_hour: UsageJsonWindow,
+    five_day: UsageJsonWindow,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct UsageJsonWindow {
     remaining_percent: u8,
-    reset_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reset_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resets_in_seconds: Option<i64>,
+}
+
+struct FamilySlots {
+    label: &'static str,
+    five_hour: Option<UsageWindow>,
+    five_day: Option<UsageWindow>,
 }
 
 pub fn parse_gemini_usage(raw: &str) -> Result<GeminiUsage, String> {
-    let mut weekly = None;
-    let mut five_hour = None;
+    let mut gemini = FamilySlots {
+        label: "Gemini",
+        five_hour: None,
+        five_day: None,
+    };
+    let mut gpt = FamilySlots {
+        label: "GPT",
+        five_hour: None,
+        five_day: None,
+    };
 
     for line in raw.lines() {
         let normalized = line.split_whitespace().collect::<Vec<_>>().join(" ");
-        let after_family = match normalized.strip_prefix("Gemini Models ") {
-            Some(value) => value,
-            None => continue,
+        let (family, after_family) = if let Some(value) = normalized.strip_prefix("Gemini Models ")
+        {
+            (&mut gemini, value)
+        } else if let Some(value) = normalized.strip_prefix("Claude and GPT models ") {
+            (&mut gpt, value)
+        } else {
+            continue;
         };
-        let (label, slot, duplicate_name) = if after_family.starts_with("Weekly Limit Remaining ") {
-            ("Weekly Limit Remaining", &mut weekly, "weekly")
+
+        let (label, slot, duplicate_name) = if after_family.starts_with("Weekly Limit Remaining ")
+            || after_family.starts_with("Five Day Limit Remaining ")
+        {
+            let label = if after_family.starts_with("Weekly Limit Remaining ") {
+                "Weekly Limit Remaining"
+            } else {
+                "Five Day Limit Remaining"
+            };
+            (label, &mut family.five_day, "five-day")
         } else if after_family.starts_with("Five Hour Limit Remaining ") {
-            ("Five Hour Limit Remaining", &mut five_hour, "five-hour")
+            (
+                "Five Hour Limit Remaining",
+                &mut family.five_hour,
+                "five-hour",
+            )
         } else {
             continue;
         };
@@ -89,37 +134,79 @@ pub fn parse_gemini_usage(raw: &str) -> Result<GeminiUsage, String> {
         let remainder = after_family
             .split_once(label)
             .map(|(_, value)| value.trim())
-            .ok_or_else(|| format!("Gemini {duplicate_name} quota row is malformed."))?;
+            .ok_or_else(|| format!("{} {duplicate_name} quota row is malformed.", family.label))?;
         let mut fields = remainder.split_whitespace();
-        let percentage = fields
+        let percentage_field = fields
             .next()
-            .and_then(|value| value.strip_suffix('%'))
-            .ok_or_else(|| "Gemini quota percentage is malformed.".to_string())?
-            .parse::<u8>()
-            .map_err(|_| "Gemini quota percentage is malformed.".to_string())?;
+            .ok_or_else(|| format!("{} quota percentage is malformed.", family.label))?;
+        let percentage = if percentage_field.eq_ignore_ascii_case("disabled")
+            || percentage_field.eq_ignore_ascii_case("unavailable")
+        {
+            0
+        } else {
+            percentage_field
+                .strip_suffix('%')
+                .ok_or_else(|| {
+                    format!(
+                        "{} quota percentage is malformed: {percentage_field}.",
+                        family.label
+                    )
+                })?
+                .parse::<u8>()
+                .map_err(|_| format!("{} quota percentage is malformed.", family.label))?
+        };
         if percentage > 100 {
-            return Err("Gemini quota percentage is outside 0..=100.".to_string());
+            return Err(format!(
+                "{} quota percentage is outside 0..=100.",
+                family.label
+            ));
         }
 
-        let reset_at = fields
-            .next()
-            .ok_or_else(|| "Gemini quota reset timestamp is missing.".to_string())?;
-        let reset_at = DateTime::parse_from_rfc3339(reset_at)
-            .map_err(|_| "Gemini quota reset timestamp is malformed.".to_string())?
-            .with_timezone(&Utc);
+        let reset_at = match fields.next() {
+            Some(value) => Some(
+                DateTime::parse_from_rfc3339(value)
+                    .map_err(|_| format!("{} quota reset timestamp is malformed.", family.label))?
+                    .with_timezone(&Utc),
+            ),
+            None if percentage_field.eq_ignore_ascii_case("disabled")
+                || percentage_field.eq_ignore_ascii_case("unavailable") =>
+            {
+                None
+            }
+            None => {
+                return Err(format!(
+                    "{} quota reset timestamp is missing.",
+                    family.label
+                ));
+            }
+        };
         let window = UsageWindow {
             remaining_percent: percentage,
             reset_at,
         };
 
         if slot.replace(window).is_some() {
-            return Err(format!("Gemini {duplicate_name} quota row is duplicated."));
+            return Err(format!(
+                "{} {duplicate_name} quota row is duplicated.",
+                family.label
+            ));
         }
     }
 
     Ok(GeminiUsage {
-        weekly: weekly.ok_or_else(|| "Gemini weekly quota row is missing.".to_string())?,
-        five_hour: five_hour.ok_or_else(|| "Gemini five-hour quota row is missing.".to_string())?,
+        gemini: finish_family(gemini)?,
+        gpt: finish_family(gpt)?,
+    })
+}
+
+fn finish_family(family: FamilySlots) -> Result<ModelFamilyUsage, String> {
+    Ok(ModelFamilyUsage {
+        five_hour: family
+            .five_hour
+            .ok_or_else(|| format!("{} five-hour quota row is missing.", family.label))?,
+        five_day: family
+            .five_day
+            .ok_or_else(|| format!("{} five-day quota row is missing.", family.label))?,
     })
 }
 
@@ -138,16 +225,173 @@ pub fn format_vietnam_datetime(timestamp: DateTime<Utc>) -> String {
         .to_string()
 }
 
-pub fn format_usage_text(profile: &str, email: &str, usage: &GeminiUsage) -> String {
+pub fn format_remaining_until(reset_at: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    let mut seconds = (reset_at - now).num_seconds();
+    if seconds <= 0 {
+        return "đã reset".to_string();
+    }
+    if seconds % 60 != 0 {
+        seconds += 60 - (seconds % 60);
+    }
+    let days = seconds / 86_400;
+    let hours = (seconds % 86_400) / 3_600;
+    let minutes = (seconds % 3_600) / 60;
+    match (days, hours, minutes) {
+        (0, 0, 0) => format!("còn {seconds}s"),
+        (0, 0, minutes) => format!("còn {minutes} phút"),
+        (0, hours, 0) => format!("còn {hours} giờ"),
+        (0, hours, minutes) => format!("còn {hours} giờ {minutes} phút"),
+        (days, 0, 0) => format!("còn {days} ngày"),
+        (days, hours, 0) => format!("còn {days} ngày {hours} giờ"),
+        (days, hours, minutes) => format!("còn {days} ngày {hours} giờ {minutes} phút"),
+    }
+}
+
+struct Style {
+    color: bool,
+}
+
+impl Style {
+    fn paint(&self, code: &str, text: &str) -> String {
+        if self.color {
+            format!("\x1b[{code}m{text}\x1b[0m")
+        } else {
+            text.to_string()
+        }
+    }
+
+    fn percent(&self, percent: u8, disabled: bool) -> String {
+        let text = format!("{percent:>3}%");
+        let code = if disabled {
+            "1;90"
+        } else if percent >= 70 {
+            "1;32"
+        } else if percent >= 30 {
+            "1;33"
+        } else {
+            "1;31"
+        };
+        self.paint(code, &text)
+    }
+
+    fn bar(&self, percent: u8) -> String {
+        let filled = (usize::from(percent) * 10) / 100;
+        let empty = 10 - filled;
+        let blocks = format!("{}{}", "█".repeat(filled), "░".repeat(empty));
+        if !self.color {
+            return blocks;
+        }
+        let code = if percent >= 70 {
+            "32"
+        } else if percent >= 30 {
+            "33"
+        } else {
+            "31"
+        };
+        format!(
+            "\x1b[{code}m{}\x1b[2;90m{}\x1b[0m",
+            "█".repeat(filled),
+            "░".repeat(empty)
+        )
+    }
+}
+
+fn pad_chars(value: &str, width: usize) -> String {
+    let len = value.chars().count();
+    if len >= width {
+        value.to_string()
+    } else {
+        format!("{value}{}", " ".repeat(width - len))
+    }
+}
+
+fn format_window_line(
+    style: &Style,
+    label: &str,
+    window: &UsageWindow,
+    now: DateTime<Utc>,
+) -> String {
+    let label = style.paint("2", &pad_chars(label, 6));
+    match window.reset_at {
+        Some(reset_at) => format!(
+            "    {label}  {}  {}  {}",
+            style.percent(window.remaining_percent, false),
+            style.bar(window.remaining_percent),
+            style.paint("2", &format_remaining_until(reset_at, now)),
+        ),
+        None => format!(
+            "    {label}  {}  {}",
+            style.percent(window.remaining_percent, true),
+            style.paint("31", "đã tắt"),
+        ),
+    }
+}
+
+fn format_family_block(
+    style: &Style,
+    title: &str,
+    family: &ModelFamilyUsage,
+    now: DateTime<Utc>,
+) -> String {
+    let title = if title == "Gemini" {
+        style.paint("1;34", title)
+    } else {
+        style.paint("1;35", title)
+    };
     format!(
-        "{} ({})\n  5 giờ: {}% — reset {}\n  Hàng tuần: {}% — reset {}",
-        profile,
-        email,
-        usage.five_hour.remaining_percent,
-        format_vietnam_datetime(usage.five_hour.reset_at),
-        usage.weekly.remaining_percent,
-        format_vietnam_datetime(usage.weekly.reset_at),
+        "  {title}\n{}\n{}",
+        format_window_line(style, "5 giờ", &family.five_hour, now),
+        format_window_line(style, "5 ngày", &family.five_day, now),
     )
+}
+
+fn render_usage_text(
+    profile: &str,
+    email: &str,
+    usage: &GeminiUsage,
+    now: DateTime<Utc>,
+    color: bool,
+    show_gpt: bool,
+) -> String {
+    let style = Style { color };
+    let mut rendered = format!(
+        "{}  {}\n{}",
+        style.paint("1;36", profile),
+        style.paint("2", email),
+        format_family_block(&style, "Gemini", &usage.gemini, now),
+    );
+    if show_gpt {
+        rendered.push('\n');
+        rendered.push_str(&format_family_block(&style, "GPT", &usage.gpt, now));
+    }
+    rendered
+}
+
+pub fn format_usage_text(profile: &str, email: &str, usage: &GeminiUsage) -> String {
+    format_usage_text_at(profile, email, usage, Utc::now())
+}
+
+pub fn format_usage_text_at(
+    profile: &str,
+    email: &str,
+    usage: &GeminiUsage,
+    now: DateTime<Utc>,
+) -> String {
+    render_usage_text(profile, email, usage, now, false, true)
+}
+
+pub fn format_usage_text_colored_at(
+    profile: &str,
+    email: &str,
+    usage: &GeminiUsage,
+    now: DateTime<Utc>,
+    show_gpt: bool,
+) -> String {
+    render_usage_text(profile, email, usage, now, true, show_gpt)
+}
+
+pub fn usage_color_enabled() -> bool {
+    std::env::var_os("NO_COLOR").is_none() && std::io::IsTerminal::is_terminal(&std::io::stdout())
 }
 
 pub fn format_usage_report(results: &[(String, String, GeminiUsage)]) -> String {
@@ -158,19 +402,36 @@ pub fn format_usage_report(results: &[(String, String, GeminiUsage)]) -> String 
         .join("\n\n")
 }
 
-fn usage_json_success(profile: &str, email: &str, usage: &GeminiUsage) -> UsageJsonResult {
+fn usage_json_window(window: &UsageWindow, now: DateTime<Utc>) -> UsageJsonWindow {
+    UsageJsonWindow {
+        remaining_percent: window.remaining_percent,
+        reset_at: window.reset_at.map(format_vietnam_rfc3339),
+        resets_in_seconds: window
+            .reset_at
+            .map(|reset_at| (reset_at - now).num_seconds().max(0)),
+    }
+}
+
+fn usage_json_family(family: &ModelFamilyUsage, now: DateTime<Utc>) -> UsageJsonFamily {
+    UsageJsonFamily {
+        five_hour: usage_json_window(&family.five_hour, now),
+        five_day: usage_json_window(&family.five_day, now),
+    }
+}
+
+fn usage_json_success(
+    profile: &str,
+    email: &str,
+    usage: &GeminiUsage,
+    now: DateTime<Utc>,
+    show_gpt: bool,
+) -> UsageJsonResult {
     UsageJsonResult {
         profile: profile.to_string(),
         email: email.to_string(),
         status: "available",
-        five_hour: Some(UsageJsonWindow {
-            remaining_percent: usage.five_hour.remaining_percent,
-            reset_at: format_vietnam_rfc3339(usage.five_hour.reset_at),
-        }),
-        weekly: Some(UsageJsonWindow {
-            remaining_percent: usage.weekly.remaining_percent,
-            reset_at: format_vietnam_rfc3339(usage.weekly.reset_at),
-        }),
+        gemini: Some(usage_json_family(&usage.gemini, now)),
+        gpt: show_gpt.then(|| usage_json_family(&usage.gpt, now)),
         error: None,
     }
 }
@@ -224,6 +485,12 @@ fn run_usage_for_profile(
     }
     let code = output.status.and_then(|status| status.code());
     if code != Some(0) {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.to_ascii_lowercase().contains("authentication") {
+            return Err(
+                "AGY authentication required. Run `agyp login <profile>` and retry.".to_string(),
+            );
+        }
         return Err(format!(
             "AGY usage command failed with exit code {}.",
             code.map_or_else(|| "signal".to_string(), |value| value.to_string())
@@ -277,7 +544,7 @@ fn execute_usage(profile_name: Option<&str>) -> Result<Vec<ProfileUsageResult>, 
         .collect())
 }
 
-pub fn cmd_usage(profile: Option<&str>, json: bool) -> Result<(), i32> {
+pub fn cmd_usage(profile: Option<&str>, json: bool, show_gpt: bool) -> Result<(), i32> {
     let results = match execute_usage(profile) {
         Ok(results) => results,
         Err(error) => {
@@ -312,7 +579,7 @@ pub fn cmd_usage(profile: Option<&str>, json: bool) -> Result<(), i32> {
                     profile,
                     email,
                     usage,
-                } => usage_json_success(profile, email, usage),
+                } => usage_json_success(profile, email, usage, Utc::now(), show_gpt),
                 ProfileUsageResult::Error {
                     profile,
                     email,
@@ -321,8 +588,8 @@ pub fn cmd_usage(profile: Option<&str>, json: bool) -> Result<(), i32> {
                     profile: profile.clone(),
                     email: email.clone(),
                     status: "error",
-                    five_hour: None,
-                    weekly: None,
+                    gemini: None,
+                    gpt: None,
                     error: Some(error.clone()),
                 },
             })
@@ -348,14 +615,25 @@ pub fn cmd_usage(profile: Option<&str>, json: bool) -> Result<(), i32> {
                     email,
                     usage,
                 } => {
-                    println!("{}", format_usage_text(profile, email, usage));
+                    let rendered = if usage_color_enabled() {
+                        format_usage_text_colored_at(profile, email, usage, Utc::now(), show_gpt)
+                    } else {
+                        render_usage_text(profile, email, usage, Utc::now(), false, show_gpt)
+                    };
+                    println!("{rendered}");
                 }
                 ProfileUsageResult::Error {
                     profile,
                     email,
                     error,
                 } => {
-                    println!("{profile} ({email})\n  Lỗi: {error}");
+                    if usage_color_enabled() {
+                        println!(
+                            "\x1b[1;36m{profile}\x1b[0m  \x1b[2m{email}\x1b[0m\n    \x1b[31mLỗi: {error}\x1b[0m"
+                        );
+                    } else {
+                        println!("{profile}  {email}\n    Lỗi: {error}");
+                    }
                 }
             }
         }

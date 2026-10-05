@@ -142,8 +142,8 @@ Rules for Hermes:
 
 | Lệnh | Mô tả |
 | :--- | :--- |
-| `agyp q` / `agyp q <profile>` | Quick check Gemini 5 giờ + hàng tuần; ẩn Claude/GPT; reset theo giờ Việt Nam |
-| `agyp quota --profile <p>` / `--all` | Kiểm tra trạng thái quota qua probe tối giản, an toàn, hỗ trợ cache 5 phút & JSON output |
+| `agyp q` / `agyp quota --all` | Quota Gemini + GPT: %, thanh usage, còn bao lâu. `--hide-gpt` ẩn GPT |
+| `agyp quota --profile <p>` / `--all` | Log quota Gemini + GPT (profile, email, 5 giờ, 5 ngày, reset). `--json` vẫn là probe |
 | `agyp task --profile <p> --worktree <path>` | Chạy task tự động trong Git linked worktree với stream draining, timeout & JSON classification |
 | `agyp login <name>` | Đăng nhập tài khoản mới qua trình duyệt OAuth |
 | `agyp login <name> --import-current` | Import phiên đăng nhập hiện tại từ macOS Keychain |

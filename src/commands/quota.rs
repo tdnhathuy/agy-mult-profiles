@@ -1000,7 +1000,15 @@ pub fn cmd_quota(
     timeout: Option<&str>,
     no_cache: bool,
     json: bool,
+    hide_gpt: bool,
 ) -> Result<(), i32> {
+    // Human-readable quota is the authoritative /usage report. --json keeps the
+    // probe contract used by agents. --timeout and --no-cache only apply there.
+    if !json {
+        let _ = (timeout, no_cache);
+        let profile = if all { None } else { profile };
+        return crate::commands::usage::cmd_usage(profile, false, !hide_gpt);
+    }
     let (code, json_doc) = execute_quota_impl(
         profile,
         all,

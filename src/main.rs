@@ -122,8 +122,11 @@ enum Commands {
         /// Output result in JSON format
         #[arg(long)]
         json: bool,
+        /// Hide the GPT quota section
+        #[arg(long)]
+        hide_gpt: bool,
     },
-    /// Show detailed Gemini quota for one profile
+    /// Show Gemini and GPT quota for one or all profiles
     #[command(alias = "q")]
     Usage {
         /// Name of one profile or alias (omit to check all profiles)
@@ -131,6 +134,9 @@ enum Commands {
         /// Output in JSON format
         #[arg(long)]
         json: bool,
+        /// Hide the GPT quota section
+        #[arg(long)]
+        hide_gpt: bool,
     },
     /// Show version or ping
     Ping,
@@ -353,17 +359,21 @@ fn main() {
             timeout,
             no_cache,
             json,
+            hide_gpt,
         }) => commands::quota::cmd_quota(
             profile.as_deref(),
             *all,
             timeout.as_deref(),
             *no_cache,
             *json,
+            *hide_gpt,
         ),
         Some(Commands::Exec { profile, args }) => commands::exec::cmd_exec(profile, args),
-        Some(Commands::Usage { profile, json }) => {
-            commands::usage::cmd_usage(profile.as_deref(), *json)
-        }
+        Some(Commands::Usage {
+            profile,
+            json,
+            hide_gpt,
+        }) => commands::usage::cmd_usage(profile.as_deref(), *json, !*hide_gpt),
         Some(Commands::Ping) => {
             println!("pong");
             Ok(())

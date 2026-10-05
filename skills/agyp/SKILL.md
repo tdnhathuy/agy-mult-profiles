@@ -33,19 +33,21 @@ Each profile runs AGY with its own isolated HOME and private macOS Keychain, so 
 
 ## Invocation
 
-### Quick Gemini Usage: `agyp usage` / `agyp q`
+### Quota Detail: `agyp usage` / `agyp q`
 
-Show authoritative `/usage` percentages for Gemini only. Omit the profile to check every registered profile sequentially:
+Show authoritative `/usage` percentages for Gemini and GPT. Omit the profile to check every registered profile sequentially:
 
 ```bash
 agyp q
 agyp q <profile>
-agyp usage [<profile>] [--json]
+agyp usage [<profile>] [--json] [--hide-gpt]
 ```
 
-The display includes the profile email plus only Gemini 5-hour and weekly remaining percentages. Reset timestamps use Vietnam time (`HH:MM:SS DD/MM/YYYY (GMT+7)`). Claude/GPT rows are intentionally omitted. Each profile has a 60-second usage transaction deadline. Report a timeout and continue sequentially; never retry automatically or switch profiles.
+Each result logs profile, email, then both model families. Each family has a 5-hour window and a 5-day window (`Weekly Limit Remaining` or `Five Day Limit Remaining`). Text shows remaining percent, a usage bar, and how long until reset. A terminal adds color; `NO_COLOR` or a pipe keeps plain text. JSON keeps the absolute reset time in `reset_at` (`remaining_percent`, `reset_at`, `resets_in_seconds`) under `gemini` and `gpt`. Each profile has a 60-second usage transaction deadline. Report a timeout and continue sequentially; never retry automatically or switch profiles.
 
 ### Quota Probing: `agyp quota`
+
+Without `--json`, `agyp quota --profile <name>` and `agyp quota --all` print the same detailed Gemini and GPT usage report as `agyp q` (profile, email, 5-hour, 5-day, time remaining). Add `--hide-gpt` to omit the GPT section. `--timeout` and `--no-cache` apply only to the JSON probe.
 
 Probe per-profile quota status using the minimal, non-mutating probe:
 
