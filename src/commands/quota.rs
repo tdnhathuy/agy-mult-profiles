@@ -16,8 +16,10 @@ use crate::agy::{
 };
 use crate::commands::task::parse_duration;
 use crate::config::ProfileRegistry;
-use crate::keychain::{KeychainBackend, KeychainGuard, SystemKeychainBackend};
-use crate::security::{validate_profile_dir_under, ProcessLock};
+use crate::keychain::{
+    activate_profile, apply_profile_home, KeychainBackend, SystemKeychainBackend,
+};
+use crate::security::{profile_lock_path, validate_profile_dir_under, ProcessLock};
 
 pub const QUOTA_PROBE_PROMPT: &str = "Respond with PONG";
 pub const QUOTA_PROBE_EXPECTED: &str = "PONG";
@@ -25,6 +27,7 @@ pub const QUOTA_CACHE_FILENAME: &str = "quota-cache.json";
 pub const QUOTA_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 pub const DEFAULT_QUOTA_TIMEOUT: Duration = Duration::from_secs(30);
 const RESTORE_EMERGENCY_TIMEOUT: Duration = Duration::from_secs(5);
+const CACHE_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -400,9 +403,11 @@ pub struct QuotaJsonOutput {
 }
 
 pub trait QuotaProbeRunner: Send + Sync {
+    /// `profile_home` is the isolated HOME the AGY probe must run with, if any.
     fn run_probe(
         &self,
         profile_dir: &Path,
+        profile_home: Option<&Path>,
         timeout: Option<Duration>,
     ) -> Result<CapturedOutput, String>;
 }
@@ -414,11 +419,13 @@ impl QuotaProbeRunner for SystemProbeRunner {
     fn run_probe(
         &self,
         profile_dir: &Path,
+        profile_home: Option<&Path>,
         timeout: Option<Duration>,
     ) -> Result<CapturedOutput, String> {
         let args = vec!["-p".to_string(), QUOTA_PROBE_PROMPT.to_string()];
         let mut cmd = build_agy_command(profile_dir, &args)?;
         cmd.current_dir(profile_dir);
+        apply_profile_home(&mut cmd, profile_home);
         run_command_captured_interruptibly_with_timeout(&mut cmd, timeout)
     }
 }
@@ -443,10 +450,26 @@ impl QuotaProbeRunner for MockProbeRunner {
     fn run_probe(
         &self,
         _profile_dir: &Path,
+        _profile_home: Option<&Path>,
         _timeout: Option<Duration>,
     ) -> Result<CapturedOutput, String> {
         self.result.lock().unwrap().clone()
     }
+}
+
+/// Concurrent quota runs on different profiles share one cache file, so updates are merged
+/// into a freshly loaded copy under a short dedicated lock instead of overwriting it.
+fn merge_quota_cache_updates(
+    cache_path: &Path,
+    updates: Vec<CachedQuotaEntry>,
+) -> Result<(), String> {
+    let lock_path = cache_path.with_extension("lock");
+    let _cache_lock = ProcessLock::acquire_with_timeout(&lock_path, CACHE_LOCK_TIMEOUT)?;
+    let mut cache = load_quota_cache(cache_path);
+    for entry in updates {
+        cache.entries.insert(entry.profile.clone(), entry);
+    }
+    save_quota_cache(cache_path, &cache)
 }
 
 fn build_error_output(profile: &str, email: Option<&str>, err_msg: &str) -> QuotaJsonOutput {
@@ -555,50 +578,12 @@ pub fn execute_quota_impl<B: KeychainBackend + Clone, R: QuotaProbeRunner>(
             ),
         );
     }
-    let remaining_lock_timeout = timeout_duration - elapsed;
-
-    // 5. Acquire process lock
-    let lock_path = ProfileRegistry::get_profiles_dir().join("agyp.lock");
-    let _process_lock = match ProcessLock::acquire_with_timeout(&lock_path, remaining_lock_timeout)
-    {
-        Ok(l) => l,
-        Err(e) if e.contains("Timed out") => {
-            let target = target_profile_names
-                .first()
-                .map(|s| s.as_str())
-                .unwrap_or("unknown");
-            return (
-                Err(1),
-                build_error_output(
-                    target,
-                    None,
-                    &format!(
-                        "Timed out waiting for process lock after {:?}",
-                        timeout_duration
-                    ),
-                ),
-            );
-        }
-        Err(e) => {
-            let target = target_profile_names
-                .first()
-                .map(|s| s.as_str())
-                .unwrap_or("unknown");
-            return (
-                Err(1),
-                build_error_output(
-                    target,
-                    None,
-                    &format!("Failed to acquire process lock: {e}"),
-                ),
-            );
-        }
-    };
+    // 5. Profiles are locked individually below, so other profiles keep running in parallel.
 
     // 6. Load cache
     let cache_path = ProfileRegistry::get_profiles_dir().join(QUOTA_CACHE_FILENAME);
-    let mut cache = load_quota_cache(&cache_path);
-    let mut cache_modified = false;
+    let cache = load_quota_cache(&cache_path);
+    let mut cache_updates: Vec<CachedQuotaEntry> = Vec::new();
 
     let profiles_root = ProfileRegistry::get_profiles_dir().join("profiles");
     let mut results: Vec<serde_json::Value> = Vec::with_capacity(target_profile_names.len());
@@ -617,6 +602,23 @@ pub fn execute_quota_impl<B: KeychainBackend + Clone, R: QuotaProbeRunner>(
         } else {
             Some(profile.email.clone())
         };
+
+        // Each profile lock re-arms the signal handlers, so an interrupt during an earlier
+        // profile must stop the run here instead of being cleared by the next acquisition.
+        if ProcessLock::interrupted() {
+            results.push(serde_json::json!({
+                "profile": profile.name,
+                "email": email_opt,
+                "status": "error",
+                "observed_at": Utc::now().to_rfc3339(),
+                "cached": false,
+                "source": "preflight",
+                "detail": "Interrupted.",
+                "agent_exit_code": null,
+            }));
+            statuses.push(QuotaStatus::Error);
+            break;
+        }
 
         // Check if overall timeout expired before starting this profile
         if start_instant.elapsed() >= timeout_duration {
@@ -712,13 +714,46 @@ pub fn execute_quota_impl<B: KeychainBackend + Clone, R: QuotaProbeRunner>(
         };
 
         let transaction_deadline = start_instant + timeout_duration;
-        // Snapshot Keychain and activate profile token under the command deadline.
-        let keychain_guard = match KeychainGuard::new_with_backend_until(
+        let remaining_lock_timeout = transaction_deadline.saturating_duration_since(Instant::now());
+        let lock_path = profile_lock_path(&ProfileRegistry::get_profiles_dir(), &profile.name);
+        let _profile_lock =
+            match ProcessLock::acquire_with_timeout(&lock_path, remaining_lock_timeout) {
+                Ok(l) => l,
+                Err(e) => {
+                    let timed_out = e.contains("Timed out");
+                    let detail = if timed_out {
+                        format!(
+                            "Timed out waiting for process lock after {:?}",
+                            timeout_duration
+                        )
+                    } else {
+                        format!("Failed to acquire process lock: {e}")
+                    };
+                    results.push(serde_json::json!({
+                        "profile": profile.name,
+                        "email": email_opt,
+                        "status": "error",
+                        "observed_at": Utc::now().to_rfc3339(),
+                        "cached": false,
+                        "source": "preflight",
+                        "detail": sanitize_detail(&detail),
+                        "agent_exit_code": null,
+                    }));
+                    statuses.push(QuotaStatus::Error);
+                    if timed_out {
+                        break;
+                    }
+                    continue;
+                }
+            };
+
+        // Snapshot the profile Keychain and activate its token under the command deadline.
+        let (keychain_guard, profile_home) = match activate_profile(
             &validated_profile_dir,
             backend.clone(),
             transaction_deadline,
         ) {
-            Ok(g) => g,
+            Ok(activated) => activated,
             Err(e) => {
                 let item = serde_json::json!({
                     "profile": profile.name,
@@ -750,7 +785,11 @@ pub fn execute_quota_impl<B: KeychainBackend + Clone, R: QuotaProbeRunner>(
         } else {
             let remaining_exec = timeout_duration - elapsed_before_exec;
             (
-                runner.run_probe(&validated_profile_dir, Some(remaining_exec)),
+                runner.run_probe(
+                    &validated_profile_dir,
+                    profile_home.as_deref(),
+                    Some(remaining_exec),
+                ),
                 false,
             )
         };
@@ -826,18 +865,14 @@ pub fn execute_quota_impl<B: KeychainBackend + Clone, R: QuotaProbeRunner>(
                         | QuotaStatus::Unauthenticated
                         | QuotaStatus::Unknown
                 ) {
-                    cache.entries.insert(
-                        profile.name.clone(),
-                        CachedQuotaEntry {
-                            profile: profile.name.clone(),
-                            email: email_opt.clone(),
-                            status: status.as_str().to_string(),
-                            observed_at: now_str,
-                            detail,
-                            agent_exit_code: exit_code,
-                        },
-                    );
-                    cache_modified = true;
+                    cache_updates.push(CachedQuotaEntry {
+                        profile: profile.name.clone(),
+                        email: email_opt.clone(),
+                        status: status.as_str().to_string(),
+                        observed_at: now_str,
+                        detail,
+                        agent_exit_code: exit_code,
+                    });
                 }
             }
             Err(e) => {
@@ -863,8 +898,8 @@ pub fn execute_quota_impl<B: KeychainBackend + Clone, R: QuotaProbeRunner>(
         }
     }
 
-    if cache_modified {
-        if let Err(error) = save_quota_cache(&cache_path, &cache) {
+    if !cache_updates.is_empty() {
+        if let Err(error) = merge_quota_cache_updates(&cache_path, cache_updates) {
             results.clear();
             statuses.clear();
             results.push(serde_json::json!({

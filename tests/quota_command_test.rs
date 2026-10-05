@@ -1388,6 +1388,7 @@ fn test_quota_no_further_probes_after_total_deadline() {
         fn run_probe(
             &self,
             _profile_dir: &Path,
+            _profile_home: Option<&Path>,
             _timeout: Option<std::time::Duration>,
         ) -> Result<agy::CapturedOutput, String> {
             self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);

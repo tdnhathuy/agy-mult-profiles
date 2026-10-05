@@ -1,7 +1,7 @@
 ---
 name: agyp
 version: 0.3.0
-description: "Use when delegating coding to AGY through one explicit Antigravity profile. Pins the profile, serializes credentials, isolates edits in a worktree, and leaves review/integration to Hermes."
+description: "Use when delegating coding to AGY through one explicit Antigravity profile. Pins the profile, isolates credentials per profile, isolates edits in a worktree, and leaves review/integration to Hermes."
 platforms: [macos]
 metadata:
   hermes:
@@ -29,7 +29,7 @@ Use `agyp` to delegate implementation to AGY while Hermes/SOL owns planning, rev
 4. Never omit the profile, use implicit defaults, round-robin, or automatically switch after `429`.
 5. For coding, create or select an isolated Git worktree. Verify its branch and clean/known status before execution.
 
-`agyp` serializes profile/Keychain activation across processes. Multiple callers may queue, but AGY profile sessions run one at a time under the shared macOS Keychain.
+Each profile runs AGY with its own isolated HOME and private macOS Keychain, so sessions on **different profiles run in parallel**. Calls on the **same profile** are serialized by a per-profile lock and may queue.
 
 ## Invocation
 
@@ -54,7 +54,7 @@ agyp quota --profile <selected-profile> [--timeout 30s] [--no-cache] [--json]
 agyp quota --all [--timeout 30s] [--no-cache] [--json]
 ```
 
-- **Contract**: Exactly one of `--profile <name>` or `--all` is required. Safely resolves aliases. `--all` evaluates registered profiles in stable alphabetical name order sequentially under a single process lock.
+- **Contract**: Exactly one of `--profile <name>` or `--all` is required. Safely resolves aliases. `--all` evaluates registered profiles in stable alphabetical name order sequentially, locking each profile only while it is probed.
 - **Probe-Based Source**: AGY 1.2.12 has no official quota/usage API. Status reflects an observed fixed probe, a validated cache entry, or a preflight result. Top-level and per-result `source` values are `probe`, `cache`, `preflight`, or `mixed`. It does NOT report percentages, token limits, remaining requests, or reset times.
 - **Statuses**:
   - `available`: Probe completed successfully with expected output.

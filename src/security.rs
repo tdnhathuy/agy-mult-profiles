@@ -229,6 +229,14 @@ pub fn validate_component(value: &str, kind: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Per-profile lock: serializes runs of the same profile while different profiles proceed in
+/// parallel, since each profile now has its own isolated Keychain.
+pub fn profile_lock_path(profiles_dir: &Path, profile_name: &str) -> PathBuf {
+    profiles_dir
+        .join("locks")
+        .join(format!("{profile_name}.lock"))
+}
+
 pub fn profile_root() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::agy::{build_agy_command, run_command_captured_interruptibly_with_timeout};
 use crate::config::ProfileRegistry;
-use crate::keychain::KeychainGuard;
+use crate::keychain::{activate_profile, apply_profile_home, PROFILE_KEYCHAIN_SETUP_TIMEOUT};
 use crate::security::{reject_symlink, validate_profile_dir_under, ProcessLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -950,7 +950,8 @@ fn execute_task_impl<B: crate::keychain::KeychainBackend>(
     }
     let remaining_lock_timeout = timeout_duration - elapsed_lock;
 
-    let lock_path = ProfileRegistry::get_profiles_dir().join("agyp.lock");
+    let lock_path =
+        crate::security::profile_lock_path(&ProfileRegistry::get_profiles_dir(), &profile.name);
     let _process_lock = match ProcessLock::acquire_with_timeout(&lock_path, remaining_lock_timeout)
     {
         Ok(l) => l,
@@ -994,8 +995,15 @@ fn execute_task_impl<B: crate::keychain::KeychainBackend>(
         }
     };
 
-    let keychain_guard = match KeychainGuard::new_with_backend(&profile_dir, backend) {
-        Ok(g) => g,
+    let keychain_guard = match activate_profile(
+        &profile_dir,
+        backend,
+        std::time::Instant::now() + PROFILE_KEYCHAIN_SETUP_TIMEOUT,
+    ) {
+        Ok((g, profile_home)) => {
+            apply_profile_home(&mut cmd, profile_home.as_deref());
+            g
+        }
         Err(e) => {
             let err_msg = format!(
                 "Failed to configure keychain for profile '{}': {}",

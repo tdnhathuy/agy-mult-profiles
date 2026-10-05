@@ -6,8 +6,8 @@ use serde::Serialize;
 
 use crate::agy::{locate_agy_binary, run_command_captured_interruptibly_with_timeout};
 use crate::config::ProfileRegistry;
-use crate::keychain::KeychainGuard;
-use crate::security::{validate_profile_dir_under, ProcessLock};
+use crate::keychain::{activate_profile, apply_profile_home};
+use crate::security::{profile_lock_path, validate_profile_dir_under, ProcessLock};
 
 pub const USAGE_PROMPT: &str = "/usage";
 pub const DEFAULT_USAGE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -187,9 +187,15 @@ fn run_usage_for_profile(
     let email = profile.email.clone();
     let profiles_root = ProfileRegistry::get_profiles_dir().join("profiles");
     let validated_profile_dir = validate_profile_dir_under(&profile.dir, &profiles_root)?;
+    // Acquiring the profile lock re-arms the signal handlers; honor an earlier interrupt first.
+    if ProcessLock::interrupted() {
+        return Err("Interrupted.".to_string());
+    }
+    let lock_path = profile_lock_path(&ProfileRegistry::get_profiles_dir(), &canonical);
+    let _lock = ProcessLock::acquire_with_timeout(&lock_path, LOCK_TIMEOUT)?;
 
     let deadline = Instant::now() + DEFAULT_USAGE_TIMEOUT;
-    let keychain_guard = KeychainGuard::new_with_backend_until(
+    let (keychain_guard, profile_home) = activate_profile(
         &validated_profile_dir,
         crate::keychain::SystemKeychainBackend,
         deadline,
@@ -197,6 +203,7 @@ fn run_usage_for_profile(
 
     let mut command = Command::new(agy_binary);
     command.args(["--print", USAGE_PROMPT]);
+    apply_profile_home(&mut command, profile_home.as_deref());
     let remaining = deadline.saturating_duration_since(Instant::now());
     let output_result = if remaining.is_zero() {
         Err("Usage check timed out.".to_string())
@@ -235,8 +242,6 @@ fn execute_usage(profile_name: Option<&str>) -> Result<Vec<ProfileUsageResult>, 
     let config_path = ProfileRegistry::get_config_file_path();
     let registry = ProfileRegistry::load_or_default(&config_path)?;
     let agy_binary = locate_agy_binary()?;
-    let lock_path = ProfileRegistry::get_profiles_dir().join("agyp.lock");
-    let _lock = ProcessLock::acquire_with_timeout(&lock_path, LOCK_TIMEOUT)?;
 
     let names = if let Some(profile_name) = profile_name {
         vec![profile_name.to_string()]

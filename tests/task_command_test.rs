@@ -911,7 +911,7 @@ fn test_lock_setup_overall_timeout() {
     fs::write(&prompt_file, "Do task").unwrap();
 
     // Acquire lock in this thread and keep it held
-    let lock_path = profiles_temp.path().join("agyp.lock");
+    let lock_path = security::profile_lock_path(profiles_temp.path(), "dev");
     fs::create_dir_all(profiles_temp.path()).unwrap();
     let _held_lock = security::ProcessLock::acquire(&lock_path).unwrap();
 

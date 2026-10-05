@@ -151,7 +151,8 @@ pub fn cmd_prompt(
         }
     };
 
-    let lock_path = ProfileRegistry::get_profiles_dir().join("agyp.lock");
+    let lock_path =
+        crate::security::profile_lock_path(&ProfileRegistry::get_profiles_dir(), &profile.name);
     let _process_lock = crate::security::ProcessLock::acquire(&lock_path).map_err(|e| {
         eprintln!("Failed to serialize AGY profile access: {e}");
         1
@@ -163,8 +164,13 @@ pub fn cmd_prompt(
             1
         })?;
 
-    // Activate target profile credentials only while holding the global process lock.
-    let keychain_guard = crate::keychain::KeychainGuard::new(&profile_dir).map_err(|e| {
+    // Activate target profile credentials in its isolated Keychain while holding the profile lock.
+    let (keychain_guard, profile_home) = crate::keychain::activate_profile(
+        &profile_dir,
+        crate::keychain::SystemKeychainBackend,
+        std::time::Instant::now() + crate::keychain::PROFILE_KEYCHAIN_SETUP_TIMEOUT,
+    )
+    .map_err(|e| {
         let err_msg = format!(
             "Failed to configure keychain for profile '{}': {}",
             profile.name, e
@@ -181,6 +187,7 @@ pub fn cmd_prompt(
         }
         1
     })?;
+    crate::keychain::apply_profile_home(&mut cmd, profile_home.as_deref());
 
     if json_output {
         let output = match run_command_captured_interruptibly(&mut cmd) {

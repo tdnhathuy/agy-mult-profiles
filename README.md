@@ -6,8 +6,9 @@ CLI tool written in Rust to manage multiple Google Antigravity (`agy`) accounts 
 
 ## ⚡ Highlights
 
-- **True macOS Keychain Isolation**: Solves `agy`'s global Keychain auto-login collision by isolating credentials per profile (`~/.gemini-profiles/profiles/<name>/keychain_token.json`).
-- **Seamless Browser OAuth**: Automatically clears Keychain prior to login so Google displays the account selection screen (`prompt=consent`).
+- **True macOS Keychain Isolation**: Solves `agy`'s global Keychain auto-login collision by giving every profile its own isolated HOME and private Keychain (`~/.gemini-profiles/homes/<name>/`).
+- **Parallel Profiles**: Different profiles run concurrently (per-profile locks); the shared system Keychain is never swapped.
+- **Seamless Browser OAuth**: Login runs inside the profile's isolated HOME, so Google displays the account selection screen without touching the system Keychain.
 - **AI Agent-First Ergonomics**:
   - Non-interactive prompts keep AGY permission checks enabled by default; `--skip-permissions` is explicit.
   - Zero wrapper noise: clean stdout streaming.
@@ -162,9 +163,11 @@ Rules for Hermes:
 ## 🔒 Security & Credential Isolation
 
 - Mỗi profile lưu token riêng tại `~/.gemini-profiles/profiles/<name>/keychain_token.json`.
-- Khi thực thi lệnh (`task` / `prompt` / `exec`), `agyp` dùng cơ chế **RAII `KeychainGuard`**:
-  1. Tạm swap token của profile đó vào macOS Keychain.
-  2. Khởi chạy `agy`.
-  3. Bắt bất kỳ token refresh nào ghi lại vào file của profile.
-  4. Phục hồi nguyên trạng Keychain ban đầu ngay khi kết thúc.
-- Ngăn chặn hoàn toàn việc rò rỉ phiên giữa các tài khoản hoặc xung đột Keychain trên macOS.
+- `agy` chỉ đọc token từ **một** item Keychain cố định (`service=gemini`, `account=antigravity`) qua `/usr/bin/security`, và `security` chọn Keychain dựa trên `$HOME`. Vì vậy mỗi profile có **HOME + Keychain riêng** tại `~/.gemini-profiles/homes/<name>/`:
+  - `Library/Keychains/login.keychain-db`: Keychain riêng của profile (mật khẩu ngẫu nhiên lưu trong `profiles/<name>/keychain_password`, không auto-lock).
+  - Các mục còn lại của HOME thật (`.gitconfig`, `.ssh`, `.config`, `.gemini`, `Library/*`, ...) được symlink để git/npm/... trong task vẫn hoạt động. Riêng `Library/Keychains` và `Library/Preferences` là thư mục riêng.
+  - Trước mỗi lần chạy, `agyp` kiểm tra search list/default Keychain dưới HOME riêng chỉ trỏ vào Keychain của profile; nếu không thì từ chối chạy.
+- Khi thực thi (`task` / `prompt` / `exec` / `quota` / `q`), `agyp` dùng **RAII `KeychainGuard`** trên Keychain riêng của profile: nạp token → chạy `agy` với `HOME=<homes/name>` → lưu token đã refresh về `keychain_token.json` → dọn Keychain riêng. Keychain hệ thống **không bị đụng tới**.
+- Lock theo profile (`~/.gemini-profiles/locks/<name>.lock`): **các profile khác nhau chạy song song**, cùng một profile thì chạy tuần tự.
+- `agyp login <name>` chạy OAuth bên trong HOME riêng của profile nên không cần xóa/khôi phục Keychain hệ thống.
+- Lưu ý: tool trong task dùng macOS Keychain (vd. `gh` lưu token trong Keychain, git HTTPS qua `osxkeychain`) sẽ không thấy credential của login Keychain thật. Dùng SSH cho git hoặc `GH_TOKEN` cho `gh`.

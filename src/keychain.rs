@@ -116,8 +116,28 @@ pub fn parse_security_find_output(
 const KEYCHAIN_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const KEYCHAIN_RESTORE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Budget for preparing a profile's isolated HOME and Keychain before AGY starts.
+pub const PROFILE_KEYCHAIN_SETUP_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// The shared system Keychain must always be resolved against the real user home, even when
+/// agyp itself runs inside an isolated profile HOME (e.g. invoked by an AGY agent).
 fn run_security_command(args: &[&str], timeout: Duration) -> Result<Output, String> {
-    let mut child = Command::new("security")
+    let real_home = real_user_home().ok();
+    run_security_command_in(args, timeout, real_home.as_deref())
+}
+
+/// Runs `security` with `HOME` overridden. macOS resolves the user Keychain search list and
+/// default Keychain relative to `$HOME`, which is what makes per-profile Keychains possible.
+fn run_security_command_in(
+    args: &[&str],
+    timeout: Duration,
+    home: Option<&Path>,
+) -> Result<Output, String> {
+    let mut command = Command::new("security");
+    if let Some(home) = home {
+        command.env("HOME", home);
+    }
+    let mut child = command
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -264,12 +284,22 @@ pub trait KeychainBackend: Send + Sync {
         let _ = duration_until(deadline)?;
         self.delete_token()
     }
+
+    /// Whether AGY runs against this backend should use a per-profile isolated HOME and
+    /// Keychain instead of swapping credentials through this backend directly.
+    fn isolates_profiles(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Default, Clone)]
 pub struct SystemKeychainBackend;
 
 impl KeychainBackend for SystemKeychainBackend {
+    fn isolates_profiles(&self) -> bool {
+        true
+    }
+
     fn read_token(&self) -> Result<Option<String>, String> {
         read_system_keychain_token()
     }
@@ -292,6 +322,471 @@ impl KeychainBackend for SystemKeychainBackend {
 
     fn delete_token_until(&self, deadline: Instant) -> Result<(), String> {
         delete_system_keychain_token_with_timeout(duration_until(deadline)?)
+    }
+}
+
+pub const ISOLATED_HOMES_DIRNAME: &str = "homes";
+pub const ISOLATED_KEYCHAIN_PASSWORD_FILENAME: &str = "keychain_password";
+const SYSTEM_KEYCHAIN_PATH: &str = "/Library/Keychains/System.keychain";
+/// Entries of the real HOME that the isolated HOME must own instead of symlinking.
+const HOME_PRIVATE_ENTRIES: &[&str] = &["Library"];
+/// `Keychains` holds the profile Keychain; `Preferences` holds its private search list.
+const LIBRARY_PRIVATE_ENTRIES: &[&str] = &["Keychains", "Preferences"];
+
+/// Resolves the account's home directory from the password database, ignoring `$HOME`.
+pub fn real_user_home() -> Result<PathBuf, String> {
+    use std::ffi::{CStr, OsStr};
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut passwd: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut buffer = vec![0 as libc::c_char; 16 * 1024];
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    let rc = unsafe {
+        libc::getpwuid_r(
+            libc::getuid(),
+            &mut passwd,
+            buffer.as_mut_ptr(),
+            buffer.len(),
+            &mut result,
+        )
+    };
+    if rc != 0 || result.is_null() || passwd.pw_dir.is_null() {
+        return Err("Failed to resolve the real user home directory".to_string());
+    }
+    let dir = unsafe { CStr::from_ptr(passwd.pw_dir) };
+    Ok(PathBuf::from(OsStr::from_bytes(dir.to_bytes())))
+}
+
+/// Isolated HOME for a profile: `<profiles_dir>/homes/<profile>`. It deliberately lives outside
+/// the profile (`--gemini_dir`) directory so AGY never walks into the mirrored real HOME.
+pub fn isolated_home_dir(profile_dir: &Path) -> Result<PathBuf, String> {
+    let name = profile_dir
+        .file_name()
+        .ok_or_else(|| format!("Invalid profile directory: {}", profile_dir.display()))?;
+    let profiles_dir = profile_dir
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| format!("Invalid profile directory: {}", profile_dir.display()))?;
+    Ok(profiles_dir.join(ISOLATED_HOMES_DIRNAME).join(name))
+}
+
+/// A profile's private HOME whose login Keychain holds only that profile's AGY credential.
+#[derive(Debug, Clone)]
+pub struct IsolatedProfileHome {
+    pub home: PathBuf,
+    pub keychain: PathBuf,
+}
+
+impl IsolatedProfileHome {
+    pub fn backend(&self) -> IsolatedKeychainBackend {
+        IsolatedKeychainBackend {
+            home: self.home.clone(),
+            keychain: self.keychain.clone(),
+        }
+    }
+}
+
+fn private_dir(path: &Path) -> Result<(), String> {
+    crate::security::reject_symlink(path).map_err(|e| e.to_string())?;
+    crate::security::secure_dir(path)
+        .map_err(|e| format!("Failed to create private directory {}: {e}", path.display()))
+}
+
+/// Symlinks every entry of `source` into `target` except `private` names, so tools AGY runs
+/// (git, gh, npm, ssh, ...) still find the user's configuration. Entries already present in
+/// `target` are left alone, and links whose real target disappeared are pruned.
+fn mirror_entries(source: &Path, target: &Path, private: &[&str]) -> Result<(), String> {
+    let entries =
+        fs::read_dir(source).map_err(|e| format!("Failed to read {}: {e}", source.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Failed to read {}: {e}", source.display()))?;
+        let name = entry.file_name();
+        if private.iter().any(|p| name == **p) {
+            continue;
+        }
+        let link = target.join(&name);
+        match fs::symlink_metadata(&link) {
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                match std::os::unix::fs::symlink(entry.path(), &link) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                    Err(e) => {
+                        return Err(format!("Failed to link {}: {e}", link.display()));
+                    }
+                }
+            }
+            Err(e) => return Err(format!("Failed to inspect {}: {e}", link.display())),
+        }
+    }
+
+    let entries =
+        fs::read_dir(target).map_err(|e| format!("Failed to read {}: {e}", target.display()))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if let Ok(destination) = fs::read_link(&path) {
+            if destination.starts_with(source) && fs::symlink_metadata(&destination).is_err() {
+                let _ = fs::remove_file(&path);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn load_or_create_keychain_password(profile_dir: &Path) -> Result<String, String> {
+    let path = profile_dir.join(ISOLATED_KEYCHAIN_PASSWORD_FILENAME);
+    crate::security::reject_symlink(&path).map_err(|e| e.to_string())?;
+    if path.is_file() {
+        let password = fs::read_to_string(&path)
+            .map_err(|e| format!("Failed to read profile Keychain password: {e}"))?;
+        let password = password.trim().to_string();
+        if !password.is_empty() {
+            return Ok(password);
+        }
+    }
+
+    let mut bytes = [0u8; 24];
+    io::Read::read_exact(
+        &mut fs::File::open("/dev/urandom")
+            .map_err(|e| format!("Failed to open random source: {e}"))?,
+        &mut bytes,
+    )
+    .map_err(|e| format!("Failed to generate profile Keychain password: {e}"))?;
+    let password: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    crate::security::write_private_file(&path, password.as_bytes())
+        .map_err(|e| format!("Failed to store profile Keychain password: {e}"))?;
+    Ok(password)
+}
+
+fn path_str(path: &Path) -> Result<&str, String> {
+    path.to_str()
+        .ok_or_else(|| format!("Path is not valid UTF-8: {}", path.display()))
+}
+
+fn same_path(a: &Path, b: &Path) -> bool {
+    a == b
+        || matches!(
+            (a.canonicalize(), b.canonicalize()),
+            (Ok(ca), Ok(cb)) if ca == cb
+        )
+}
+
+/// Parses the quoted, indented path list printed by `security list-keychains`.
+fn parse_keychain_list(stdout: &[u8]) -> Vec<PathBuf> {
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .map(|line| line.trim().trim_matches('"'))
+        .filter(|line| !line.is_empty())
+        .map(PathBuf::from)
+        .collect()
+}
+
+fn run_isolated_security(
+    home: &IsolatedProfileHome,
+    args: &[&str],
+    deadline: Instant,
+    action: &str,
+) -> Result<Output, String> {
+    let output = run_security_command_in(args, duration_until(deadline)?, Some(&home.home))?;
+    if output.status.success() {
+        Ok(output)
+    } else {
+        Err(format!(
+            "Failed to {action}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
+/// Refuses to run AGY unless the isolated HOME resolves only to the profile Keychain (plus the
+/// read-only System Keychain). Otherwise AGY could read or overwrite another account's token.
+fn verify_isolated_keychain(home: &IsolatedProfileHome, deadline: Instant) -> Result<(), String> {
+    let listed = run_isolated_security(home, &["list-keychains"], deadline, "list Keychains")?;
+    for keychain in parse_keychain_list(&listed.stdout) {
+        if !same_path(&keychain, &home.keychain) && keychain != Path::new(SYSTEM_KEYCHAIN_PATH) {
+            return Err(format!(
+                "Isolated Keychain search list unexpectedly includes {}",
+                keychain.display()
+            ));
+        }
+    }
+    let default = run_isolated_security(
+        home,
+        &["default-keychain"],
+        deadline,
+        "read default Keychain",
+    )?;
+    for keychain in parse_keychain_list(&default.stdout) {
+        if !same_path(&keychain, &home.keychain) {
+            return Err(format!(
+                "Isolated default Keychain is unexpectedly {}",
+                keychain.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Creates (or refreshes) the profile's isolated HOME and unlocks its private Keychain.
+/// Must be called while holding the profile lock.
+pub fn prepare_isolated_home(
+    profile_dir: &Path,
+    deadline: Instant,
+) -> Result<IsolatedProfileHome, String> {
+    prepare_isolated_home_mirroring(profile_dir, &real_user_home()?, deadline)
+}
+
+/// Same as [`prepare_isolated_home`], mirroring `real_home` instead of the account's home.
+pub fn prepare_isolated_home_mirroring(
+    profile_dir: &Path,
+    real_home: &Path,
+    deadline: Instant,
+) -> Result<IsolatedProfileHome, String> {
+    let home_dir = isolated_home_dir(profile_dir)?;
+    if let Some(homes_root) = home_dir.parent() {
+        private_dir(homes_root)?;
+    }
+    private_dir(&home_dir)?;
+    let library = home_dir.join("Library");
+    private_dir(&library)?;
+    private_dir(&library.join("Keychains"))?;
+    private_dir(&library.join("Preferences"))?;
+
+    mirror_entries(real_home, &home_dir, HOME_PRIVATE_ENTRIES)?;
+    let real_library = real_home.join("Library");
+    if real_library.is_dir() {
+        mirror_entries(&real_library, &library, LIBRARY_PRIVATE_ENTRIES)?;
+    }
+
+    let home = IsolatedProfileHome {
+        keychain: library.join("Keychains").join("login.keychain-db"),
+        home: home_dir,
+    };
+    let keychain = path_str(&home.keychain)?;
+    let password = load_or_create_keychain_password(profile_dir)?;
+
+    if !home.keychain.exists() {
+        run_isolated_security(
+            &home,
+            &["create-keychain", "-p", &password, keychain],
+            deadline,
+            "create profile Keychain",
+        )?;
+        // No lock-on-sleep and no idle timeout: unattended agents must not hit a locked Keychain.
+        run_isolated_security(
+            &home,
+            &["set-keychain-settings", keychain],
+            deadline,
+            "configure profile Keychain",
+        )?;
+    }
+    run_isolated_security(
+        &home,
+        &["unlock-keychain", "-p", &password, keychain],
+        deadline,
+        "unlock profile Keychain",
+    )?;
+    run_isolated_security(
+        &home,
+        &["list-keychains", "-d", "user", "-s", keychain],
+        deadline,
+        "set profile Keychain search list",
+    )?;
+    run_isolated_security(
+        &home,
+        &["default-keychain", "-d", "user", "-s", keychain],
+        deadline,
+        "set profile default Keychain",
+    )?;
+    verify_isolated_keychain(&home, deadline)?;
+    Ok(home)
+}
+
+/// Reads and writes AGY's `gemini`/`antigravity` item in one profile's private Keychain.
+/// Every call names the Keychain file explicitly so it can never touch another Keychain.
+#[derive(Debug, Clone)]
+pub struct IsolatedKeychainBackend {
+    home: PathBuf,
+    keychain: PathBuf,
+}
+
+impl IsolatedKeychainBackend {
+    fn read_with_timeout(&self, timeout: Duration) -> Result<Option<String>, String> {
+        let keychain = path_str(&self.keychain)?;
+        let output = run_security_command_in(
+            &[
+                "find-generic-password",
+                "-s",
+                KEYCHAIN_SERVICE,
+                "-a",
+                KEYCHAIN_ACCOUNT,
+                "-w",
+                keychain,
+            ],
+            timeout,
+            Some(&self.home),
+        )?;
+        parse_security_find_output(output.status.code(), &output.stdout, &output.stderr)
+    }
+
+    fn write_with_timeout(&self, token: &str, timeout: Duration) -> Result<(), String> {
+        let keychain = path_str(&self.keychain)?;
+        let output = run_security_command_in(
+            &[
+                "add-generic-password",
+                "-U",
+                "-s",
+                KEYCHAIN_SERVICE,
+                "-a",
+                KEYCHAIN_ACCOUNT,
+                "-w",
+                token,
+                keychain,
+            ],
+            timeout,
+            Some(&self.home),
+        )?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "Failed to write profile Keychain token: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))
+        }
+    }
+
+    fn delete_with_timeout(&self, timeout: Duration) -> Result<(), String> {
+        let keychain = path_str(&self.keychain)?;
+        let output = run_security_command_in(
+            &[
+                "delete-generic-password",
+                "-s",
+                KEYCHAIN_SERVICE,
+                "-a",
+                KEYCHAIN_ACCOUNT,
+                keychain,
+            ],
+            timeout,
+            Some(&self.home),
+        )?;
+        if output.status.success()
+            || String::from_utf8_lossy(&output.stderr).contains("could not be found")
+        {
+            Ok(())
+        } else {
+            Err(format!(
+                "Failed to delete profile Keychain token: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ))
+        }
+    }
+}
+
+impl KeychainBackend for IsolatedKeychainBackend {
+    fn read_token(&self) -> Result<Option<String>, String> {
+        self.read_with_timeout(KEYCHAIN_COMMAND_TIMEOUT)
+    }
+
+    fn write_token(&self, token: &str) -> Result<(), String> {
+        self.write_with_timeout(token, KEYCHAIN_COMMAND_TIMEOUT)
+    }
+
+    fn delete_token(&self) -> Result<(), String> {
+        self.delete_with_timeout(KEYCHAIN_COMMAND_TIMEOUT)
+    }
+
+    fn read_token_until(&self, deadline: Instant) -> Result<Option<String>, String> {
+        self.read_with_timeout(duration_until(deadline)?)
+    }
+
+    fn write_token_until(&self, token: &str, deadline: Instant) -> Result<(), String> {
+        self.write_with_timeout(token, duration_until(deadline)?)
+    }
+
+    fn delete_token_until(&self, deadline: Instant) -> Result<(), String> {
+        self.delete_with_timeout(duration_until(deadline)?)
+    }
+}
+
+/// The Keychain a single AGY run uses: either the caller's backend as-is, or the profile's
+/// isolated Keychain when the backend opts into per-profile isolation.
+#[derive(Debug, Clone)]
+pub enum ProfileKeychain<B> {
+    Shared(B),
+    Isolated(IsolatedKeychainBackend),
+}
+
+impl<B: KeychainBackend> KeychainBackend for ProfileKeychain<B> {
+    fn read_token(&self) -> Result<Option<String>, String> {
+        match self {
+            Self::Shared(b) => b.read_token(),
+            Self::Isolated(b) => b.read_token(),
+        }
+    }
+
+    fn write_token(&self, token: &str) -> Result<(), String> {
+        match self {
+            Self::Shared(b) => b.write_token(token),
+            Self::Isolated(b) => b.write_token(token),
+        }
+    }
+
+    fn delete_token(&self) -> Result<(), String> {
+        match self {
+            Self::Shared(b) => b.delete_token(),
+            Self::Isolated(b) => b.delete_token(),
+        }
+    }
+
+    fn read_token_until(&self, deadline: Instant) -> Result<Option<String>, String> {
+        match self {
+            Self::Shared(b) => b.read_token_until(deadline),
+            Self::Isolated(b) => b.read_token_until(deadline),
+        }
+    }
+
+    fn write_token_until(&self, token: &str, deadline: Instant) -> Result<(), String> {
+        match self {
+            Self::Shared(b) => b.write_token_until(token, deadline),
+            Self::Isolated(b) => b.write_token_until(token, deadline),
+        }
+    }
+
+    fn delete_token_until(&self, deadline: Instant) -> Result<(), String> {
+        match self {
+            Self::Shared(b) => b.delete_token_until(deadline),
+            Self::Isolated(b) => b.delete_token_until(deadline),
+        }
+    }
+}
+
+/// Activates a profile's credential for one AGY run. Returns the guard plus the `HOME` the AGY
+/// process must be started with (`None` when the backend does not isolate profiles).
+/// Must be called while holding the profile lock.
+pub fn activate_profile<B: KeychainBackend>(
+    profile_dir: &Path,
+    backend: B,
+    deadline: Instant,
+) -> Result<(KeychainGuard<ProfileKeychain<B>>, Option<PathBuf>), String> {
+    let (scoped, home) = if backend.isolates_profiles() {
+        let isolated = prepare_isolated_home(profile_dir, deadline)
+            .map_err(|e| format!("Failed to prepare isolated profile Keychain: {e}"))?;
+        (
+            ProfileKeychain::Isolated(isolated.backend()),
+            Some(isolated.home),
+        )
+    } else {
+        (ProfileKeychain::Shared(backend), None)
+    };
+    let guard = KeychainGuard::new_with_backend_until(profile_dir, scoped, deadline)?;
+    Ok((guard, home))
+}
+
+/// Points an AGY command at the profile's isolated HOME, if any.
+pub fn apply_profile_home(cmd: &mut Command, home: Option<&Path>) {
+    if let Some(home) = home {
+        cmd.env("HOME", home);
     }
 }
 
@@ -402,12 +897,6 @@ pub struct KeychainGuard<B: KeychainBackend = SystemKeychainBackend> {
     saved_system_token: Option<String>,
     target_profile_dir: Option<PathBuf>,
     persistence_attempted: bool,
-}
-
-impl KeychainGuard<SystemKeychainBackend> {
-    pub fn new(target_profile_dir: &Path) -> Result<Self, String> {
-        Self::new_with_backend(target_profile_dir, SystemKeychainBackend)
-    }
 }
 
 impl<B: KeychainBackend> KeychainGuard<B> {

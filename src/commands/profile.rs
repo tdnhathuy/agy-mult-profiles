@@ -4,9 +4,11 @@ use chrono::Utc;
 use serde_json::json;
 use std::fs;
 use std::io::{self, Write};
+use std::time::Instant;
 
 use crate::agy::{check_profile_auth, extract_profile_email, locate_agy_binary};
 use crate::config::{ProfileInfo, ProfileRegistry};
+use crate::keychain::KeychainBackend;
 
 pub fn cmd_login(name: &str, import_current: bool) -> Result<(), i32> {
     crate::security::validate_component(name, "profile name").map_err(|e| {
@@ -18,7 +20,7 @@ pub fn cmd_login(name: &str, import_current: bool) -> Result<(), i32> {
         eprintln!("Error: {}", e);
         1
     })?;
-    let lock_path = ProfileRegistry::get_profiles_dir().join("agyp.lock");
+    let lock_path = crate::security::profile_lock_path(&ProfileRegistry::get_profiles_dir(), name);
     let _process_lock = crate::security::ProcessLock::acquire(&lock_path).map_err(|e| {
         eprintln!("Failed to serialize AGY profile access: {e}");
         1
@@ -76,59 +78,51 @@ pub fn cmd_login(name: &str, import_current: bool) -> Result<(), i32> {
             }
         }
     } else {
-        // Fresh interactive login for a new account:
-        // 1. Back up the exact Keychain state and restore it after login.
-        let prev_keychain_token = match crate::keychain::read_system_keychain_token() {
-            Ok(tok) => tok,
-            Err(e) => {
-                eprintln!("Error checking Keychain before login: {e}");
-                return Err(1);
-            }
-        };
-
-        // 2. Remove the existing token so AGY cannot silently reuse the old account.
-        let _ = crate::keychain::delete_system_keychain_token();
-
-        let agy_bin = match locate_agy_binary() {
-            Ok(b) => b,
-            Err(e) => {
-                eprintln!("Error: {}", e);
-                let restore = match prev_keychain_token {
-                    Some(ref prev) => crate::keychain::write_system_keychain_token(prev),
-                    None => crate::keychain::delete_system_keychain_token(),
-                };
-                if let Err(restore_err) = restore {
-                    eprintln!("Failed to restore prior Keychain state: {restore_err}");
-                }
-                return Err(127);
-            }
-        };
+        // Fresh interactive login runs AGY inside the profile's isolated HOME, so OAuth writes
+        // straight into the profile Keychain and the shared system Keychain is never touched.
+        let agy_bin = locate_agy_binary().map_err(|e| {
+            eprintln!("Error: {}", e);
+            127
+        })?;
+        let isolated = crate::keychain::prepare_isolated_home(
+            &profile_dir,
+            Instant::now() + crate::keychain::PROFILE_KEYCHAIN_SETUP_TIMEOUT,
+        )
+        .map_err(|e| {
+            eprintln!("Failed to prepare isolated profile Keychain: {e}");
+            1
+        })?;
+        let profile_keychain = isolated.backend();
+        // Remove any leftover token so AGY cannot silently reuse a previous account.
+        profile_keychain.delete_token().map_err(|e| {
+            eprintln!("Failed to clear profile Keychain before login: {e}");
+            1
+        })?;
 
         println!("Initiating Google OAuth login for profile '{}'...", name);
         println!("Please sign in with the Google account for this profile in your browser.");
 
         let mut login_cmd = std::process::Command::new(agy_bin);
         login_cmd.arg(format!("--gemini_dir={}", profile_dir.display()));
+        crate::keychain::apply_profile_home(&mut login_cmd, Some(&isolated.home));
         let status_res = crate::agy::run_command_interruptibly(&mut login_cmd);
 
-        let persist_result = match crate::keychain::read_system_keychain_token() {
+        let persist_result = match profile_keychain.read_token() {
             Ok(Some(token)) => crate::keychain::save_token_to_profile(&profile_dir, &token)
                 .map(|_| ())
                 .map_err(|e| format!("Failed to save profile credential: {e}")),
             Ok(None) => {
                 Err("Login was cancelled or failed to authenticate with Google.".to_string())
             }
-            Err(e) => Err(format!("Failed to read Keychain token after login: {e}")),
+            Err(e) => Err(format!(
+                "Failed to read profile Keychain token after login: {e}"
+            )),
         };
-        let restore_result = match prev_keychain_token {
-            Some(prev) => crate::keychain::write_system_keychain_token(&prev),
-            None => crate::keychain::delete_system_keychain_token(),
-        };
-
-        if let Err(e) = restore_result {
-            eprintln!("Failed to restore prior Keychain state: {e}");
-            return Err(1);
+        // keychain_token.json is the source of truth; each run re-activates it.
+        if let Err(e) = profile_keychain.delete_token() {
+            eprintln!("Warning: failed to clear profile Keychain after login: {e}");
         }
+
         if let Err(e) = persist_result {
             eprintln!("{e}");
             return Err(status_res.map(|s| s.code().unwrap_or(1)).unwrap_or(1));
@@ -313,6 +307,21 @@ pub fn cmd_rm(name: &str, yes: bool) -> Result<(), i32> {
         eprintln!("Refusing to delete unsafe profile path: {e}");
         1
     })?;
+    let isolated_home = crate::keychain::isolated_home_dir(&safe_profile_dir).map_err(|e| {
+        eprintln!("Error: {e}");
+        1
+    })?;
+    if fs::symlink_metadata(&isolated_home).is_ok() {
+        crate::security::reject_symlink(&isolated_home).map_err(|e| {
+            eprintln!("Refusing to delete unsafe isolated home: {e}");
+            1
+        })?;
+        // remove_dir_all removes the mirrored HOME symlinks themselves, never their targets.
+        fs::remove_dir_all(&isolated_home).map_err(|e| {
+            eprintln!("Failed to delete isolated profile home: {e}");
+            1
+        })?;
+    }
     fs::remove_dir_all(&safe_profile_dir).map_err(|e| {
         eprintln!("Failed to delete profile directory: {e}");
         1

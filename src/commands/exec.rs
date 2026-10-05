@@ -1,7 +1,12 @@
 #![allow(dead_code)]
 
+use std::time::Instant;
+
 use crate::agy::{build_agy_command, run_command_interruptibly};
 use crate::config::ProfileRegistry;
+use crate::keychain::{
+    activate_profile, apply_profile_home, SystemKeychainBackend, PROFILE_KEYCHAIN_SETUP_TIMEOUT,
+};
 
 pub fn cmd_exec(profile_arg: &str, raw_args: &[String]) -> Result<(), i32> {
     let config_path = ProfileRegistry::get_config_file_path();
@@ -20,7 +25,8 @@ pub fn cmd_exec(profile_arg: &str, raw_args: &[String]) -> Result<(), i32> {
         127
     })?;
 
-    let lock_path = ProfileRegistry::get_profiles_dir().join("agyp.lock");
+    let lock_path =
+        crate::security::profile_lock_path(&ProfileRegistry::get_profiles_dir(), &profile.name);
     let _process_lock = crate::security::ProcessLock::acquire(&lock_path).map_err(|e| {
         eprintln!("Failed to serialize AGY profile access: {e}");
         1
@@ -31,13 +37,19 @@ pub fn cmd_exec(profile_arg: &str, raw_args: &[String]) -> Result<(), i32> {
             eprintln!("Invalid profile directory: {e}");
             1
         })?;
-    let keychain_guard = crate::keychain::KeychainGuard::new(&profile_dir).map_err(|e| {
+    let (keychain_guard, profile_home) = activate_profile(
+        &profile_dir,
+        SystemKeychainBackend,
+        Instant::now() + PROFILE_KEYCHAIN_SETUP_TIMEOUT,
+    )
+    .map_err(|e| {
         eprintln!(
             "Failed to configure keychain for profile '{}': {}",
             profile.name, e
         );
         1
     })?;
+    apply_profile_home(&mut cmd, profile_home.as_deref());
 
     let status = run_command_interruptibly(&mut cmd).map_err(|e| {
         eprintln!("{e}");

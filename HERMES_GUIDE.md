@@ -47,7 +47,7 @@ Use `agyp` to execute AGY prompts through one explicitly selected Google account
      ]
    }
    Exit codes: 0 = all available, 2 = quota_exhausted or unauthenticated, 1 = error/timeout/unknown/unsupported.
-   Note: `--timeout` is one total command deadline shared by lock acquisition and every profile in `--all`; it is not per-profile. Top-level and per-result `source` are `probe`, `cache`, `preflight`, or `mixed` according to provenance. AGY 1.2.12 exposes exact Gemini percentages and reset timestamps through `/usage`; this command surfaces those authoritative values. The separate `agyp quota` command remains an observed-health probe.
+   Note: `--timeout` is one total command deadline shared by per-profile lock acquisition and every profile in `--all`; it is not per-profile. Top-level and per-result `source` are `probe`, `cache`, `preflight`, or `mixed` according to provenance. AGY 1.2.12 exposes exact Gemini percentages and reset timestamps through `/usage`; this command surfaces those authoritative values. The separate `agyp quota` command remains an observed-health probe.
 
 4. Run a delegated coding task (RECOMMENDED):
    agyp task --profile <profile> --worktree <linked-worktree-path> --prompt-file <path> [--timeout 20m] [--skip-permissions] [--json]
