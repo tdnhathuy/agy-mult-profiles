@@ -15,6 +15,53 @@ pub fn cmd_exec(profile_arg: &str, raw_args: &[String]) -> Result<(), i32> {
         1
     })?;
 
+    if let Some(binding) = reg.isolated.get(&profile.name) {
+        let lock_path =
+            ProfileRegistry::get_profiles_dir().join(format!("isolated-{}.lock", profile.name));
+        let _lock = crate::security::ProcessLock::acquire(&lock_path).map_err(|e| {
+            eprintln!("Isolated lock: {e}");
+            1
+        })?;
+        let id = crate::isolate::lookup(&binding.user).map_err(|e| {
+            eprintln!("Identity: {e}");
+            1
+        })?;
+        crate::isolate::validate_binding(&reg, &profile.name, binding, &id, unsafe {
+            libc::getuid()
+        })
+        .map_err(|e| {
+            eprintln!("Identity: {e}");
+            1
+        })?;
+        crate::isolate::gui_session(binding.uid).map_err(|e| {
+            eprintln!("Session: {e}");
+            1
+        })?;
+        let binary =
+            crate::isolate::check_binary(&crate::agy::locate_agy_binary().map_err(|e| {
+                eprintln!("{e}");
+                127
+            })?)
+            .map_err(|e| {
+                eprintln!("Binary: {e}");
+                1
+            })?;
+        let mut command =
+            crate::isolate::isolated_command(binding, &binary, raw_args).map_err(|e| {
+                eprintln!("Command: {e}");
+                1
+            })?;
+        let status = run_command_interruptibly(&mut command).map_err(|e| {
+            eprintln!("{e}");
+            1
+        })?;
+        return if status.success() {
+            Ok(())
+        } else {
+            Err(status.code().unwrap_or(1))
+        };
+    }
+
     let mut cmd = build_agy_command(&profile.dir, raw_args).map_err(|e| {
         eprintln!("Error: {}", e);
         127

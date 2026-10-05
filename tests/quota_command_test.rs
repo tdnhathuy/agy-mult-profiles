@@ -1,3 +1,5 @@
+#[path = "../src/isolate.rs"]
+mod isolate;
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;

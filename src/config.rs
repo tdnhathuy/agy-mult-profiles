@@ -21,6 +21,8 @@ pub struct ProfileRegistry {
     pub default_profile: Option<String>,
     pub aliases: HashMap<String, String>,
     pub profiles: HashMap<String, ProfileInfo>,
+    #[serde(default)]
+    pub isolated: HashMap<String, crate::isolate::Binding>,
 }
 
 impl Default for ProfileRegistry {
@@ -30,6 +32,7 @@ impl Default for ProfileRegistry {
             default_profile: None,
             aliases: HashMap::new(),
             profiles: HashMap::new(),
+            isolated: HashMap::new(),
         }
     }
 }

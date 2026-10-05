@@ -5,6 +5,8 @@ mod agy;
 mod commands;
 #[path = "../src/config.rs"]
 mod config;
+#[path = "../src/isolate.rs"]
+mod isolate;
 #[path = "../src/keychain.rs"]
 mod keychain;
 #[path = "../src/security.rs"]

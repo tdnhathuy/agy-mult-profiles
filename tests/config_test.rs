@@ -1,3 +1,5 @@
+#[path = "../src/isolate.rs"]
+mod isolate;
 use std::path::PathBuf;
 use tempfile::tempdir;
 

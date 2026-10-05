@@ -1,6 +1,7 @@
 mod agy;
 mod commands;
 mod config;
+mod isolate;
 mod isolated_probe;
 pub mod keychain;
 mod security;
@@ -16,6 +17,21 @@ use clap::{Parser, Subcommand};
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum IsolateCommands {
+    Bind {
+        profile: String,
+        #[arg(long)]
+        user: String,
+    },
+    Unbind {
+        profile: String,
+    },
+    Status {
+        profile: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -102,6 +118,11 @@ enum Commands {
     IsolatedProbe {
         /// Explicit profile name (not an alias)
         profile: String,
+    },
+    /// Bind a profile to a separate logged-in macOS local user
+    Isolate {
+        #[command(subcommand)]
+        command: IsolateCommands,
     },
     /// Execute arbitrary agy commands under a profile
     Exec {
@@ -369,6 +390,17 @@ fn main() {
         Some(Commands::IsolatedProbe { profile }) => {
             isolated_probe::prepare(profile).map_err(|e| {
                 eprintln!("Isolated probe unavailable: {e}");
+                1
+            })
+        }
+        Some(Commands::Isolate { command }) => {
+            let action = match command {
+                IsolateCommands::Bind { profile, user } => isolate::bind(profile, user),
+                IsolateCommands::Unbind { profile } => isolate::unbind(profile),
+                IsolateCommands::Status { profile } => isolate::status(profile.as_deref()),
+            };
+            action.map_err(|e| {
+                eprintln!("Isolate: {e}");
                 1
             })
         }

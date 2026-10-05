@@ -1,3 +1,5 @@
+#[path = "../src/isolate.rs"]
+mod isolate;
 use tempfile::tempdir;
 
 #[path = "../src/agy.rs"]
