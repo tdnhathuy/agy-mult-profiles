@@ -247,12 +247,12 @@ pub fn format_remaining_until(reset_at: DateTime<Utc>, now: DateTime<Utc>) -> St
     }
 }
 
-struct Style {
-    color: bool,
+pub(crate) struct Style {
+    pub(crate) color: bool,
 }
 
 impl Style {
-    fn paint(&self, code: &str, text: &str) -> String {
+    pub(crate) fn paint(&self, code: &str, text: &str) -> String {
         if self.color {
             format!("\x1b[{code}m{text}\x1b[0m")
         } else {
@@ -305,7 +305,7 @@ fn pad_chars(value: &str, width: usize) -> String {
     }
 }
 
-fn format_window_line(
+pub(crate) fn format_window_line(
     style: &Style,
     label: &str,
     window: &UsageWindow,

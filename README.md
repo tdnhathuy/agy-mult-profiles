@@ -171,3 +171,26 @@ Rules for Hermes:
 - Lock theo profile (`~/.gemini-profiles/locks/<name>.lock`) chỉ giữ vài giây lúc chuẩn bị Keychain, nên **nhiều phiên chạy song song được, kể cả trên cùng một profile**. Nếu profile đang bận, `agyp` báo `... is in use by another agyp command; waiting...`.
 - `agyp login <name>` chạy OAuth bên trong HOME riêng của profile. Ngay khi OAuth xong, profile được ghi vào registry (hiện trong `agyp ls`) và dùng được luôn, dù phiên `agy` của login vẫn đang mở.
 - Lưu ý: tool trong task dùng macOS Keychain (vd. `gh` lưu token trong Keychain, git HTTPS qua `osxkeychain`) sẽ không thấy credential của login Keychain thật. Dùng SSH cho git hoặc `GH_TOKEN` cho `gh`.
+
+---
+
+## 🧩 codexp — Codex CLI multi-account
+
+`codexp` (cài cùng `make install`) chạy `codex exec` dưới nhiều account ChatGPT, mỗi profile một `CODEX_HOME` riêng ở `~/.codex-profiles/homes/<name>/`. Không cần Keychain, các profile chạy song song thoải mái.
+
+**codexp không bao giờ login hay refresh token.** Account được login ở OmniRoute, export `auth.json` rồi import vào codexp:
+
+```bash
+codexp import c1 --from ~/Desktop/auth-codex/auth-a@gmail.com.json --remove-source
+codexp list
+codexp task --profile c1 --worktree ../wt-a --prompt-file prompt.md --timeout 30m --json
+codexp q                  # quota Codex của mọi profile (5 giờ + 7 ngày, giờ VN)
+codexp exec c1            # mở Codex TUI bằng account c1
+```
+
+- Khi import, refresh token bị thay bằng giá trị giả và endpoint refresh/revoke của Codex bị trỏ vào địa chỉ chết, nên codexp không thể làm xoay (rotate) hay thu hồi token đang dùng ở OmniRoute.
+- Đổi lại, khi access token hết hạn (~7–10 ngày) profile sẽ báo `unauthenticated` (exit 2): export lại từ OmniRoute rồi `codexp import <name> --from <file>` (cùng account thì ghi đè bình thường).
+- Import từ chối file có `id_token` / `access_token` / `account_id` không cùng một account, file đã hết hạn, và việc đổi account trong cùng profile hoặc import trùng account (trừ khi `--force`).
+- Config Codex dùng chung: `~/.codex-profiles/config.toml`. codexp luôn ép `model_provider="openai"`, `cli_auth_credentials_store="file"`, `forced_login_method="chatgpt"`. `AGENTS.md`, `skills`, `rules` được symlink từ `~/.codex`.
+- `codexp q [profile] [--json]` gọi endpoint usage của ChatGPT (cùng nguồn với `/status` của Codex) bằng access token đã import: chỉ đọc, không refresh. Gói plus có cửa sổ 5 giờ và 7 ngày, gói free có một cửa sổ 30 ngày.
+- Skill cho orchestrator: `skills/codexp/SKILL.md`.
