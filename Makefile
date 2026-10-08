@@ -1,4 +1,4 @@
-.PHONY: build test install clean
+.PHONY: build test install install-skills uninstall-skills clean
 
 build:
 	cargo build --release
@@ -18,6 +18,12 @@ install: build
 	cp target/release/codexp $(HOME)/.local/bin/codexp
 	chmod +x $(HOME)/.local/bin/codexp
 	@echo "Installed codexp to $(HOME)/.local/bin/codexp"
+
+install-skills:
+	bash scripts/install-skills.sh
+
+uninstall-skills:
+	bash scripts/install-skills.sh --uninstall
 
 clean:
 	cargo clean

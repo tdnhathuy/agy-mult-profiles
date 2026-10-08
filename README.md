@@ -97,16 +97,42 @@ profile-2       user3@gmail.com                p2              no         ready
 
 ---
 
+## 🧠 Cài Agent Skills (Claude, Codex/GPT, Orca, AGY)
+
+Repo có sẵn 2 skill: `skills/agyp` (giao việc cho AGY qua nhiều account) và `skills/codexp` (giao việc cho Codex qua nhiều account). Cài global cho mọi agent bằng một lệnh:
+
+```bash
+make install-skills            # = bash scripts/install-skills.sh
+```
+
+Script symlink từng skill vào:
+
+| Thư mục | Agent |
+| :--- | :--- |
+| `~/.agents/skills` | Codex (GPT) và các agent đọc thư mục skill chung |
+| `~/.claude/skills` | Claude Code (bỏ qua nếu chưa cài) |
+| `~/.gemini/antigravity/skills` | Antigravity / Hermes (bỏ qua nếu chưa cài) |
+
+- Vì là symlink nên chỉ cần `git pull` là mọi agent dùng bản mới. Mở lại session agent để nạp skill.
+- Bản skill cũ không phải symlink sẽ được đổi tên thành `<tên>.bak-<thời gian>`, không bị xoá.
+- Tuỳ chọn: `--copy` (copy thay vì symlink), `--dry-run`, `--target <dir>`, chỉ định skill (`scripts/install-skills.sh agyp`), gỡ bằng `make uninstall-skills`.
+
+Trong Orca, khi bạn bảo "giao cho AGY", coordinator (Claude/Codex) sẽ theo skill `agyp`:
+1. Chọn profile còn nhiều quota nhất (`agyp usage --json`). Các task song song dùng profile khác nhau.
+2. Tạo một worktree Orca cho mỗi task (`orca worktree create`, không kèm `--agent`). Comment của worktree ghi profile và task.
+3. Trong terminal sẵn có của worktree, chạy `agyp exec <profile> -- -i "<prompt>"`. AGY mở TUI và chạy prompt luôn, bạn xem trực tiếp được. Tên terminal là `AGY <profile> · <task>`.
+4. Coordinator theo dõi bằng `orca terminal wait/read`. Khi thấy dòng `AGY_TASK_DONE`, nó review diff, chạy test, rồi tự commit và merge.
+
+Không có Orca thì skill dùng `agyp task` (headless, trả JSON).
+
+---
+
 ## 🤖 Hướng dẫn tích hợp cho Hermes (AI Agent)
 
 Hermes có thể tương tác với `agyp` qua terminal/bash tool.
 
 ### 1. Cài đặt Agent Skill cho Hermes
-File skill mẫu đã có sẵn tại `skills/agyp/SKILL.md`. Copy vào thư mục skill toàn cục của hệ thống:
-```bash
-mkdir -p ~/.gemini/antigravity/skills/agyp
-cp skills/agyp/SKILL.md ~/.gemini/antigravity/skills/agyp/
-```
+Chạy `make install-skills` (xem phần trên). Skill được link vào `~/.gemini/antigravity/skills/agyp`.
 
 ### 2. System Prompt / Instruction mẫu cho Hermes
 Copy đoạn sau vào System Prompt hoặc Custom Instructions của Hermes:

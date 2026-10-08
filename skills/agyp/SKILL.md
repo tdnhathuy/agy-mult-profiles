@@ -1,148 +1,161 @@
 ---
 name: agyp
-version: 0.3.0
-description: "Use when delegating coding to AGY through one explicit Antigravity profile. Pins the profile, isolates credentials per profile, isolates edits in a worktree, and leaves review/integration to Hermes."
-platforms: [macos]
-metadata:
-  hermes:
-    tags: [coding-agent, antigravity, multi-profile, delegation, worktree]
-    related_skills: [agentic-development-orchestration, isolated-worktree-development, requesting-code-review]
+description: Use when delegating, assigning, or handing off coding work to AGY, Antigravity, or Gemini ("giao cho AGY", "giao cho đệ", "assign to agy"), from Orca or any coordinator agent (Claude, Codex/GPT, Hermes), or when spreading work across multiple Antigravity accounts to use more quota.
 ---
 
-# AGY Multi-Profile Delegation
+# agyp: delegate coding to AGY across many accounts
 
-Use `agyp` to delegate implementation to AGY while Hermes/SOL owns planning, review, testing, commits, merges, and pushes.
+`agyp` runs the Antigravity CLI (`agy`) under one of several Google accounts ("profiles"). Each profile has its own isolated HOME and Keychain, so many AGY sessions run in parallel on different accounts. More profiles = more Gemini quota.
 
-## Preconditions
+**You are the coordinator.** AGY only edits files in its worktree. You pick the profile, write the prompt, watch progress, review the diff, run the tests, and do every commit/merge/push.
 
-1. Verify binaries and profiles:
-   ```bash
-   command -v agyp && agyp --version
-   command -v agy && agy --version
-   agyp list --json
-   ```
-2. Probe quota availability before selecting a profile:
-   ```bash
-   agyp quota --all --json
-   ```
-3. Select one explicit authenticated, available profile from the list and pin it for the task.
-4. Never omit the profile, use implicit defaults, round-robin, or automatically switch after `429`.
-5. For coding, create or select an isolated Git worktree. Verify its branch and clean/known status before execution.
+**One task = one worktree = one terminal running `agyp exec <profile>`.** In Orca, the user watches every AGY session live in its worktree's own terminal.
 
-Each profile runs AGY with its own isolated HOME and private macOS Keychain, so sessions run in parallel, **including several sessions on the same profile**. A per-profile lock is held only for a few seconds while the Keychain is prepared.
+## Never use these for AGY work
 
-## Invocation
+| Don't | Why | Do instead |
+|---|---|---|
+| `orca worktree create --agent antigravity`, `orca orchestration worker-start --agent antigravity` | Launches plain `agy` on one account; ignores all other profiles | `orca worktree create` **without** `--agent`, then `agyp exec <profile>` in its terminal |
+| `orca terminal create …` for AGY | Adds a second terminal next to the one Orca already made | Reuse the worktree's existing terminal |
+| raw `agy` | Uses the single system login | `agyp exec <profile> -- …` |
+| `--dangerously-skip-permissions` | Not needed: trusting the worktree already allows read/edit/run inside it | Answer the trust prompt (step 5) |
 
-### Quota Detail: `agyp usage` / `agyp q`
+## Workflow in Orca
 
-Show authoritative `/usage` percentages for Gemini and GPT. Omit the profile to check every registered profile sequentially:
+Use this when `orca status --json` reports the runtime as `ready` and the repo shows up in `orca repo list --json`. Otherwise use "Without Orca" below.
+
+### 1. Clarify, then pick profiles
+
+If a task is ambiguous (missing file, unclear target), ask the user before creating anything.
 
 ```bash
-agyp q
-agyp q <profile>
-agyp usage [<profile>] [--json] [--hide-gpt]
+agyp usage --json    # quota per profile, ~6s per profile
 ```
 
-Each result logs profile, email, then both model families. Each family has a 5-hour window and a 5-day window (`Weekly Limit Remaining` or `Five Day Limit Remaining`). Text shows remaining percent, a usage bar, and how long until reset. A terminal adds color; `NO_COLOR` or a pipe keeps plain text. JSON keeps the absolute reset time in `reset_at` (`remaining_percent`, `reset_at`, `resets_in_seconds`) under `gemini` and `gpt`. Each profile has a 60-second usage transaction deadline. Report a timeout and continue sequentially; never retry automatically or switch profiles.
+Each `results[]` entry has `profile`, `email`, `status`, and `gemini.five_hour.remaining_percent` / `gemini.five_day.remaining_percent`.
 
-### Quota Probing: `agyp quota`
+- Rank `available` profiles by the **lower** of their two Gemini percentages and pick the highest.
+- Skip any profile where either window is 0.
+- Give each parallel task a **different** profile.
 
-Without `--json`, `agyp quota --profile <name>` and `agyp quota --all` print the same detailed Gemini and GPT usage report as `agyp q` (profile, email, 5-hour, 5-day, time remaining). Add `--hide-gpt` to omit the GPT section. `--timeout` and `--no-cache` apply only to the JSON probe.
-
-Probe per-profile quota status using the minimal, non-mutating probe:
+### 2. Create the worktree
 
 ```bash
-agyp quota --profile <selected-profile> [--timeout 30s] [--no-cache] [--json]
-agyp quota --all [--timeout 30s] [--no-cache] [--json]
+orca repo list --json      # repo id (path: selectors fail on symlinked repo paths)
+orca worktree create --repo id:<repo-id> --name agy-<slug> \
+  --comment "AGY <profile>: <one-line task summary>" --json
 ```
 
-- **Contract**: Exactly one of `--profile <name>` or `--all` is required. Safely resolves aliases. `--all` evaluates registered profiles in stable alphabetical name order sequentially, locking each profile only while it is probed.
-- **Probe-Based Source**: AGY 1.2.12 has no official quota/usage API. Status reflects an observed fixed probe, a validated cache entry, or a preflight result. Top-level and per-result `source` values are `probe`, `cache`, `preflight`, or `mixed`. It does NOT report percentages, token limits, remaining requests, or reset times.
-- **Statuses**:
-  - `available`: Probe completed successfully with expected output.
-  - `quota_exhausted`: Genuine anchored 429 RESOURCE_EXHAUSTED or individual quota limit signal.
-  - `unauthenticated`: Missing stored credentials or genuine auth failure.
-  - `unknown`: Probe completed without establishing a recognized state.
-  - `error`: Timeout, process lock, local setup, or Keychain restoration failure.
-  - `unsupported`: Platform or configuration cannot run probe safely.
-- **Exit Codes**:
-  - `0`: All requested profiles are available (including valid cached available).
-  - `2`: Any profile is `quota_exhausted` or `unauthenticated` (and no errors/unknown/unsupported exist).
-  - `1`: Invalid args, timeout, unknown, error, unsupported, or Keychain restoration failure.
-- **Caching**: Results cached in `~/.gemini-profiles/quota-cache.json` with 5-minute TTL and mode 0600. Contains only sanitized metadata (no prompts, outputs, or credentials). Use `--no-cache` to force a fresh probe.
-- **Deadline**: `--timeout` is one overall command deadline covering lock acquisition and the sequential `--all` run; it is not a per-profile allowance. Once it expires, later profiles are not probed and Keychain restoration receives a separately bounded emergency cleanup attempt.
-- **Safety Policy**: Never retry a failed probe or automatically switch profiles when encountering quota limits. Keychain restoration failures stop `--all` immediately.
+- The checkout path is in `result.worktree.path`.
+- Add `--no-parent` when your own checkout belongs to a different repo.
+- The `--comment` shows in Orca's sidebar, so the user sees which account runs which task.
 
-### Recommended: `agyp task` (Production-Hardened Task Delegation)
-
-For agentic delegation, **always prefer `agyp task`**. It strictly validates that `--worktree` is an isolated linked Git worktree, sets AGY's working directory, drains stdout/stderr concurrently to avoid OS pipe deadlocks, enforces timeouts, and classifies outcomes into machine-readable JSON:
+### 3. Find and label its terminal
 
 ```bash
-agyp task --profile <selected-profile> --worktree <absolute-worktree-path> --prompt-file <prompt-path> [--timeout 20m] [--model <model>] [--skip-permissions] [--json]
+orca terminal list --worktree path:<worktree-path> --json   # handle = result.terminals[0].handle
+orca terminal rename --terminal <handle> --title "AGY <profile> · <slug>"
+orca worktree set --worktree path:<worktree-path> --workspace-status in-progress
 ```
 
-Or pass prompts via stdin:
+### 4. Write the prompt file, then launch AGY with it
+
+Write the prompt to a temp path **outside** the worktree with no spaces in the path, for example `$TMPDIR/agy-<slug>.md`. AGY can read it there; a file inside the worktree would end up in the diff. It must contain:
+
+```text
+Work only inside <absolute-worktree-path>.
+Task: <what to build or fix, with file paths and acceptance criteria>.
+Run the relevant tests: <exact command>.
+Do not commit, merge, rebase, push, or switch branches.
+Finish by reporting: files changed, tests run with results, open risks.
+Then print a final line: AGY_TASK_DONE
+```
+
+Launch AGY in the worktree's terminal. `-i` starts the interactive TUI and submits the first prompt, so you don't paste anything:
 
 ```bash
-printf '%s\n' '<scoped task>' | agyp task --profile <selected-profile> --worktree <absolute-worktree-path> --json
+orca terminal send --terminal <handle> --enter \
+  --text 'agyp exec <profile> -- -i "Read <prompt-file> and follow every instruction in it."'
 ```
 
-Key features of `agyp task`:
-- **Explicit Profile**: `--profile` is mandatory; never falls back to defaults or rotates accounts.
-- **Linked Worktree Validation**: Rejects canonical/main checkouts, non-worktree dirs, subdirectories, and symlinks.
-- **Concurrent Stream Draining**: Reader threads drain stdout and stderr immediately from process start so large outputs cannot deadlock the OS pipe.
-- **Success Gate**: Requires child exit 0, trimmed stdout non-empty, and absence of permission denial or quota exhaustion markers.
-- **Classified Failure Outcomes**: JSON includes `status`, `failure_kind`, `agent_failure_kind` (when restoration fails after child error), `restore_error` (Keychain restoration failure error), `agent_exit_code` (child process status), `cli_exit_code` (nonzero on all failures), backward-compatible `exit_code`, `timed_out`, `duration_ms`, `stdout`, and `stderr`.
-- **Keychain Safety**: Restores the original Keychain state on all paths (success, error, timeout, interrupt). Restoration failure takes precedence and fails the command with exit code 1 (`setup_error`).
+Use `--model <id>` after `--` to pick a model; `agy models` lists them.
 
-### Legacy / Quick Prompt: `agyp prompt`
+### 5. Answer the one-time trust prompt
 
-Run AGY with the isolated worktree as the terminal tool's `workdir`:
+AGY asks "Do you trust the contents of this project?" once per new worktree. The first `wait` returns `blockedReason: "agent-trust-workspace"`:
 
 ```bash
-agyp prompt <selected-profile> "<scoped task>"
+orca terminal wait --terminal <handle> --for tui-idle --timeout-ms 60000 --json
+orca terminal read --terminal <handle> --screen
 ```
 
-Permission auto-approval is **off by default**. Only with explicit user authorization, and only inside a disposable isolated worktree, add:
+Send Enter (the default is "Yes, I trust this folder") **only while the screen actually shows that question** and names your worktree path:
 
 ```bash
-agyp prompt <selected-profile> --skip-permissions "<scoped task>"
+orca terminal send --terminal <handle> --enter
 ```
 
-`--add-dir` adds context; it does not change AGY's working directory.
+Orca can keep reporting `agent-trust-workspace` after the question is answered. Always decide from the screen, never from `blockedReason` alone. A stray Enter could approve a different question.
 
-For stdin input, omit the positional prompt:
+### 6. Wait for the result
+
+Repeat until the screen has a line that is exactly `AGY_TASK_DONE`:
 
 ```bash
-{ printf '%s\n\n' '<instruction>'; cat <file>; } | agyp prompt <selected-profile>
+orca terminal wait --terminal <handle> --for tui-idle --timeout-ms 600000 --json
+orca terminal read --terminal <handle> --screen
 ```
 
-Use `agyp exec <selected-profile> -- <agy-args>` only for AGY flags unsupported by `prompt` or `task`. Do not use `--continue` unless the conversation belongs to this exact task.
+- While AGY works, `wait` may return at once with `satisfied: false`. Pause 15–30 seconds before the next round.
+- `satisfied: true` alone does not mean the task is done. Only the `AGY_TASK_DONE` line does.
 
-## Delegation Contract
+| What you see on screen | Action |
+|---|---|
+| `AGY_TASK_DONE` plus AGY's report | Go to step 7 |
+| A question or approval prompt | Answer only if it concerns this worktree and the task; otherwise ask the user |
+| `429`, `RESOURCE_EXHAUSTED`, or a quota message | See "Quota exhausted" |
+| Login or auth error | Ask the user to run `agyp login <profile>` in their own terminal |
 
-Every coding prompt must state:
+To send a follow-up instruction to the same session: `orca terminal send --terminal <handle> --text "<one line>" --enter`.
 
-- Work only inside `<absolute-worktree-path>`.
-- Inspect, implement, and run relevant tests.
-- Do not touch the canonical checkout or `main`/`master`.
-- Do not commit, merge, rebase, cherry-pick, push, or manage remotes.
-- Report changed files, exact tests run/results, and unresolved risks.
+### 7. Review and integrate (coordinator only)
 
-Hermes/SOL independently inspects the complete diff and reruns repository gates. A successful AGY exit is not an integration approval.
+1. `git -C <worktree> status --short` and `git -C <worktree> diff`. Reject unrelated files.
+2. Run the repo's tests, lint, and build yourself. AGY saying "tests pass" is a claim, not proof.
+3. Commit on the worktree branch, then merge or open a PR the way the repo expects.
+4. `orca worktree set --worktree path:<worktree-path> --workspace-status in-review` while waiting for merge.
+5. After merging: `orca worktree rm --worktree path:<worktree-path> --force --json`. This also closes the AGY terminal. Removal finishes a few seconds later.
 
-## Rate Limits and Failures
+**Status at a glance:** `orca worktree list --json` lists every `agy-*` worktree with its comment (profile and task) and status. `orca terminal read --terminal <handle> --screen` shows any session's progress.
 
-- On authentication failure, stop and ask the user to run `agyp login <profile>` interactively. Never automate Google login or handle credentials directly.
-- On `429` or resource exhaustion, do not switch profiles and do not blindly rerun a mutating prompt. Inspect worktree state first; stop and report the blocker unless the user explicitly authorizes a bounded retry on the same profile.
-- Never print, read back, or include token files in prompts, logs, diffs, or chat.
+## Quota exhausted
 
-## Parent Review Gate
+Keep the task on its profile and inspect `git -C <worktree> status`. Report the blocker to the user. Moving the same task to another profile requires the user's explicit OK, because the first run's partial edits are still in the worktree. Choosing a different profile for a *new* task is always fine.
 
-After AGY returns:
+## Without Orca: headless
 
-1. Inspect `git status --short --branch` and the complete diff.
-2. Reject unrelated files or ownership violations.
-3. Run the repository's format, lint, typecheck, test, and build gates as applicable.
-4. Independently review security-sensitive changes.
-5. Only Hermes commits, integrates, merges, or pushes.
+Create a linked worktree, then run AGY non-interactively and read the JSON result:
+
+```bash
+git -C <repo> worktree add -b agy/<slug> <repo>-wt/agy-<slug>
+agyp task --profile <profile> --worktree <worktree-path> --prompt-file <prompt-file> --timeout 30m --json
+```
+
+- Use the same prompt contract as step 4. You can drop the `AGY_TASK_DONE` line.
+- Headless mode denies every shell command unless `--skip-permissions` is passed. Pass it only if the user allows it. Otherwise tell AGY not to run commands, and run the tests yourself.
+- Result fields:
+  - `status: "success"` with exit code `0` means AGY finished; `stdout` holds its report.
+  - Other outcomes set `failure_kind`: `unauthenticated` (exit 2), `quota_exhausted`, `empty_output`, or `timeout`.
+  - With `empty_output`, if `stderr` mentions the `"command" permission`, AGY tried to run a shell command and was blocked.
+- Run parallel tasks as background jobs with one output file each. Clean up with `git worktree remove <path>` and `git branch -d <branch>`.
+
+## Other commands
+
+```bash
+agyp list --json                    # profiles and emails
+agyp q [<profile>]                  # human-readable quota with reset times
+agyp alias set p1 profile-1         # short names; work anywhere a profile is accepted
+agyp login <profile>                # user only: interactive Google OAuth in a browser
+```
+
+Never read, print, or copy files under `~/.gemini-profiles/` (they hold credentials).
