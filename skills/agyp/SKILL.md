@@ -11,6 +11,10 @@ description: Use when delegating, assigning, or handing off coding work to AGY, 
 
 **One task = one worktree = one terminal running `agyp exec <profile>`.** In Orca, the user watches every AGY session live in its worktree's own terminal.
 
+**The coordinator can be any model** (Cursor, claude-omni, Claude, Codex, Hermes…): the steps below are the same whichever one you are.
+
+**Defaults:** the AGY model is `gemini-3.8-flash-high` (fast and reliable for scoped tasks). When AGY finishes, you close its session and **leave the worktree for the user to review**. Never open a PR, merge, or delete the worktree on your own; the user decides (step 7).
+
 ## Never use these for AGY work
 
 | Don't | Why | Do instead |
@@ -42,11 +46,13 @@ Each `results[]` entry has `profile`, `email`, `status`, and `gemini.five_hour.r
 
 ```bash
 orca repo list --json      # repo id (path: selectors fail on symlinked repo paths)
+orca worktree list --json  # stale agy-* worktrees? ask the user before adding more; keep ≤ 5 open
 orca worktree create --repo id:<repo-id> --name agy-<slug> \
   --comment "AGY <profile>: <one-line task summary>" --json
 ```
 
 - The checkout path is in `result.worktree.path`.
+- Branch name: `agy/<slug>` (rename with `git -C <worktree> branch -m agy/<slug>` if Orca chose another). If the user later opens a PR, title it `[agy:<profile>] <summary>` so the source is traceable.
 - Add `--no-parent` when your own checkout belongs to a different repo.
 - The `--comment` shows in Orca's sidebar, so the user sees which account runs which task.
 
@@ -60,25 +66,44 @@ orca worktree set --worktree path:<worktree-path> --workspace-status in-progress
 
 ### 4. Write the prompt file, then launch AGY with it
 
-Write the prompt to a temp path **outside** the worktree with no spaces in the path, for example `$TMPDIR/agy-<slug>.md`. AGY can read it there; a file inside the worktree would end up in the diff. It must contain:
+**Scout first.** Before writing the prompt, read the relevant code yourself: find the files to change, the existing pattern to copy, and the test command. AGY should never have to search for what you already know. This is what avoids re-runs.
+
+Write the prompt to a temp path **outside** the worktree with no spaces in the path, for example `$TMPDIR/agy-<slug>.md`. AGY can read it there; a file inside the worktree would end up in the diff. Template:
 
 ```text
 Work only inside <absolute-worktree-path>.
-Task: <what to build or fix, with file paths and acceptance criteria>.
-Run the relevant tests: <exact command>.
+
+Goal: <one sentence>.
+Context: <2-4 lines: why, what exists today>.
+
+Files to change:
+- <path>: <what to do there>
+Files to read for the pattern (copy its style): <path>
+Do NOT touch: <paths or areas>.
+
+Acceptance criteria:
+- [ ] <observable, checkable result>
+- [ ] <…>
+
+Verify by running: <exact test/lint/build command>. Fix failures before reporting.
+
+Constraints: no refactors outside the listed files, no new dependencies, keep existing style.
 Do not commit, merge, rebase, push, or switch branches.
-Finish by reporting: files changed, tests run with results, open risks.
+
+Finish by reporting: files changed, command output summary, open risks or assumptions.
 Then print a final line: AGY_TASK_DONE
 ```
+
+Before sending, check: every path exists, acceptance criteria are checkable, and the task fits one pass. If it spans unrelated areas, split it into several tasks (one worktree each).
 
 Launch AGY in the worktree's terminal. `-i` starts the interactive TUI and submits the first prompt, so you don't paste anything:
 
 ```bash
 orca terminal send --terminal <handle> --enter \
-  --text 'agyp exec <profile> -- -i "Read <prompt-file> and follow every instruction in it."'
+  --text 'agyp exec <profile> -- --model gemini-3.8-flash-high -i "Read <prompt-file> and follow every instruction in it."'
 ```
 
-Use `--model <id>` after `--` to pick a model; `agy models` lists them.
+Change the model only if the user asks; `agy models` lists the options.
 
 ### 5. Answer the one-time trust prompt
 
@@ -118,13 +143,17 @@ orca terminal read --terminal <handle> --screen
 
 To send a follow-up instruction to the same session: `orca terminal send --terminal <handle> --text "<one line>" --enter`.
 
-### 7. Review and integrate (coordinator only)
+**Retry limit:** if the result still fails your checks after 2 follow-ups, stop. Do not burn more quota: fix it yourself or report to the user.
+
+### 7. Review, close the session, hand the worktree to the user
 
 1. `git -C <worktree> status --short` and `git -C <worktree> diff`. Reject unrelated files.
 2. Run the repo's tests, lint, and build yourself. AGY saying "tests pass" is a claim, not proof.
-3. Commit on the worktree branch, then merge or open a PR the way the repo expects.
-4. `orca worktree set --worktree path:<worktree-path> --workspace-status in-review` while waiting for merge.
-5. After merging: `orca worktree rm --worktree path:<worktree-path> --force --json`. This also closes the AGY terminal. Removal finishes a few seconds later.
+3. Close AGY's session so it stops using quota: `orca terminal close --terminal <handle>`.
+4. `orca worktree set --worktree path:<worktree-path> --workspace-status in-review`.
+5. Report to the user: worktree path/name, profile used, files changed, test results you ran, open risks. Then **stop**.
+
+**Do not** commit, push, open a PR, merge, or remove the worktree unless the user asks. They review the worktree in Orca and decide. Only when they say so: commit/PR/merge as the repo expects, then `orca worktree rm --worktree path:<worktree-path> --force --json` and `git branch -d <branch>` if merged.
 
 **Status at a glance:** `orca worktree list --json` lists every `agy-*` worktree with its comment (profile and task) and status. `orca terminal read --terminal <handle> --screen` shows any session's progress.
 
@@ -138,7 +167,7 @@ Create a linked worktree, then run AGY non-interactively and read the JSON resul
 
 ```bash
 git -C <repo> worktree add -b agy/<slug> <repo>-wt/agy-<slug>
-agyp task --profile <profile> --worktree <worktree-path> --prompt-file <prompt-file> --timeout 30m --json
+agyp task --profile <profile> --worktree <worktree-path> --prompt-file <prompt-file> --timeout 30m --model gemini-3.8-flash-high --json
 ```
 
 - Use the same prompt contract as step 4. You can drop the `AGY_TASK_DONE` line.
