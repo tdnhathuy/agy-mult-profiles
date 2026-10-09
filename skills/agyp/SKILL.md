@@ -1,26 +1,26 @@
 ---
 name: agyp
-description: Use when delegating, assigning, or handing off coding work to AGY, Antigravity, or Gemini ("giao cho AGY", "giao cho đệ", "assign to agy"), from Orca or any coordinator agent (Claude, Codex/GPT, Hermes), or when spreading work across multiple Antigravity accounts to use more quota.
+description: Use when the user gives a requirement to be planned and delegated to AGY, Antigravity, or Gemini ("giao cho AGY", "giao cho đệ", "assign to agy"), or delegates, assigns, or hands off coding work to them, from Orca or any coordinator agent (Cursor, Claude, Codex/GPT, Hermes), or when spreading work across multiple Antigravity accounts to use more quota.
 ---
 
 # agyp: delegate coding to AGY across many accounts
 
 `agyp` runs the Antigravity CLI (`agy`) under one of several Google accounts ("profiles"). Each profile has its own isolated HOME and Keychain, so many AGY sessions run in parallel on different accounts. More profiles = more Gemini quota.
 
-**You are the coordinator.** AGY only edits files in its worktree. You pick the profile, write the prompt, watch progress, review the diff, run the tests, and do every commit/merge/push.
+**You are the coordinator.** AGY only edits files in its worktree. You pick the profiles, write the prompt, relay between sessions, and do the final check. Code review is done by a second AGY session, not by you: this saves your tokens.
 
-**One task = one worktree = one terminal running `agyp exec <profile>`.** In Orca, the user watches every AGY session live in its worktree's own terminal.
+**One task = one worktree = a worker session + a reviewer session.** The worker runs in the worktree's own terminal; the reviewer runs in a split pane next to it. In Orca, the user watches both live.
 
 **The coordinator can be any model** (Cursor, claude-omni, Claude, Codex, Hermes…): the steps below are the same whichever one you are.
 
-**Defaults:** the AGY model is `gemini-3.8-flash-high` (fast and reliable for scoped tasks). When AGY finishes, you close its session and **leave the worktree for the user to review**. Never open a PR, merge, or delete the worktree on your own; the user decides (step 7).
+**Defaults:** the AGY model is `gemini-3.8-flash-high` (fast and reliable for scoped tasks). When the reviewer approves, you close both sessions and **leave the worktree for the user to review**. Never open a PR, merge, or delete the worktree on your own; the user decides (step 8).
 
 ## Never use these for AGY work
 
 | Don't | Why | Do instead |
 |---|---|---|
 | `orca worktree create --agent antigravity`, `orca orchestration worker-start --agent antigravity` | Launches plain `agy` on one account; ignores all other profiles | `orca worktree create` **without** `--agent`, then `agyp exec <profile>` in its terminal |
-| `orca terminal create …` for AGY | Adds a second terminal next to the one Orca already made | Reuse the worktree's existing terminal |
+| `orca terminal create …` for the worker | Adds a second terminal next to the one Orca already made | Reuse the worktree's existing terminal; only the reviewer gets a split pane (step 7) |
 | raw `agy` | Uses the single system login | `agyp exec <profile> -- …` |
 | `--dangerously-skip-permissions` | Not needed: trusting the worktree already allows read/edit/run inside it | Answer the trust prompt (step 5) |
 
@@ -28,9 +28,26 @@ description: Use when delegating, assigning, or handing off coding work to AGY, 
 
 Use this when `orca status --json` reports the runtime as `ready` and the repo shows up in `orca repo list --json`. Otherwise stop and tell the user Orca isn't ready; there is no other way to run AGY tasks.
 
-### 1. Clarify, then pick profiles
+### 0. Plan with the user (the only approval gate)
 
-If a task is ambiguous (missing file, unclear target), ask the user before creating anything.
+The user usually gives a rough requirement. Turn it into a task list they approve **once**; after that you run everything without asking again.
+
+1. **Load the skills the requirement needs.** Check which skills you have and load the relevant ones: e.g. performance, debugging, frontend/design, impact analysis, the repo's own skills. For a large or vague requirement, load `superpowers:brainstorming` if available, but use only its questioning; do not write a spec file or commit. A skill you don't have is simply skipped.
+   - If you load `superpowers:writing-plans`, skip its execution-choice step: execution is always AGY via this skill, never Claude subagents or inline.
+2. **Scout the code** yourself: files to change, the existing pattern to copy, the test command. AGY should never have to search for what you already know. This is what avoids re-runs.
+3. **Present one short note** and wait:
+   - Your understanding of the requirement (what the user said vs. what you assume).
+   - Open questions, if any.
+   - The task list, one line each: goal · files · test command · depends on (task # or none).
+
+   Split so each task fits one AGY pass and tasks touch different files. If two tasks must edit the same file, make one depend on the other.
+4. **Do not create any worktree until the user approves.** If they change something, update the note and ask again.
+
+After approval: write every task's prompt (step 4), then run steps 1–8 for each task with no further questions to the user. Start all tasks with no unmet dependency in parallel; start a dependent task only after its dependency reaches step 8. From here you only wait on markers and relay one-liners. Ask the user again only for a blocker (auth, quota, round limit, a prompt outside the task's scope).
+
+There is no plan file in the repo: the prompt files in `$TMPDIR` are the plan, and the approved note lives in the chat.
+
+### 1. Pick profiles
 
 ```bash
 agyp usage --json    # quota per profile, ~6s per profile
@@ -40,7 +57,8 @@ Each `results[]` entry has `profile`, `email`, `status`, and `gemini.five_hour.r
 
 - Rank `available` profiles by the **lower** of their two Gemini percentages and pick the highest.
 - Skip any profile where either window is 0.
-- Give each parallel task a **different** profile.
+- Give each parallel task a **different** worker profile.
+- Pick the reviewer profile at step 7, when the worker finishes (quota and free profiles may have changed by then).
 
 ### 2. Create the worktree
 
@@ -66,9 +84,7 @@ orca worktree set --worktree path:<worktree-path> --workspace-status in-progress
 
 ### 4. Write the prompt file, then launch AGY with it
 
-**Scout first.** Before writing the prompt, read the relevant code yourself: find the files to change, the existing pattern to copy, and the test command. AGY should never have to search for what you already know. This is what avoids re-runs.
-
-Write the prompt to a temp path **outside** the worktree with no spaces in the path, for example `$TMPDIR/agy-<slug>.md`. AGY can read it there; a file inside the worktree would end up in the diff. Template:
+Use what you found while scouting in step 0. Write the prompt to a temp path **outside** the worktree with no spaces in the path, for example `$TMPDIR/agy-<slug>.md`. AGY can read it there; a file inside the worktree would end up in the diff. Template:
 
 ```text
 Work only inside <absolute-worktree-path>.
@@ -94,7 +110,7 @@ Finish by reporting: files changed, command output summary, open risks or assump
 Then print a final line: AGY_TASK_DONE
 ```
 
-Before sending, check: every path exists, acceptance criteria are checkable, and the task fits one pass. If it spans unrelated areas, split it into several tasks (one worktree each).
+Before sending, check: every path exists, acceptance criteria are checkable, and the prompt matches the approved task line. If the task turns out bigger than one pass, stop and bring the split back to the user (step 0) instead of launching it.
 
 Launch AGY in the worktree's terminal. `-i` starts the interactive TUI and submits the first prompt, so you don't paste anything:
 
@@ -136,22 +152,70 @@ orca terminal read --terminal <handle> --screen
 
 | What you see on screen | Action |
 |---|---|
-| `AGY_TASK_DONE` plus AGY's report | Go to step 7 |
+| `AGY_TASK_DONE` plus AGY's report | Go to step 7 (don't read the diff yourself) |
 | A question or approval prompt | Answer only if it concerns this worktree and the task; otherwise ask the user |
 | `429`, `RESOURCE_EXHAUSTED`, or a quota message | See "Quota exhausted" |
 | Login or auth error | Ask the user to run `agyp login <profile>` in their own terminal |
 
 To send a follow-up instruction to the same session: `orca terminal send --terminal <handle> --text "<one line>" --enter`.
 
-**Retry limit:** if the result still fails your checks after 2 follow-ups, stop. Do not burn more quota: fix it yourself or report to the user.
+### 7. Cross-review by a second AGY session
 
-### 7. Review, close the session, hand the worktree to the user
+**Pick the reviewer profile:** run `agyp usage --json` again and use the same ranking as step 1, but prefer a profile that is **not the worker's** and not running another task. If every other profile is busy or out of quota, use the worker's own profile in a **new** session; a fresh session has none of the worker's context, so it still reviews independently.
 
-1. `git -C <worktree> status --short` and `git -C <worktree> diff`. Reject unrelated files.
-2. Run the repo's tests, lint, and build yourself. AGY saying "tests pass" is a claim, not proof.
-3. Close AGY's session so it stops using quota: `orca terminal close --terminal <handle>`.
-4. `orca worktree set --worktree path:<worktree-path> --workspace-status in-review`.
-5. Report to the user: worktree path/name, profile used, files changed, test results you ran, open risks. Then **stop**.
+**Write the review prompt** to `$TMPDIR/agy-<slug>-review-prompt.md`:
+
+```text
+You are reviewing, not coding. Work only inside <absolute-worktree-path>. Do NOT edit any file in it.
+
+The task given to the developer is in <prompt-file>. Read it first.
+Review the uncommitted changes: git status --short, git diff (and new untracked files).
+Run: <exact test/lint/build command>.
+
+Check: every acceptance criterion is met; nothing outside "Files to change" was touched;
+no bugs, missing edge cases, or style that breaks the existing pattern; the command passes.
+
+Write your findings to <review-file> (overwrite it), one item per line:
+  <path>:<line> - <problem> - <what to change>
+Only real problems that must be fixed; no praise, no optional nits.
+
+Then print exactly one final line:
+  REVIEW_APPROVED   (no items)
+  REVIEW_CHANGES    (items written to the review file)
+```
+
+`<review-file>` is `$TMPDIR/agy-<slug>-review.md`, outside the worktree.
+
+**Launch the reviewer** in a split pane of the worker's terminal:
+
+```bash
+orca terminal split --terminal <worker-handle> --direction vertical --json   # reviewer handle in the result (or: orca terminal list)
+orca terminal rename --terminal <reviewer-handle> --title "AGY <reviewer-profile> · review <slug>"
+orca terminal send --terminal <reviewer-handle> --enter \
+  --text 'agyp exec <reviewer-profile> -- --model gemini-3.8-flash-high -i "Read <review-prompt-file> and follow every instruction in it."'
+```
+
+A different profile asks the trust question again: answer it as in step 5. Then wait as in step 6, but for `REVIEW_APPROVED` or `REVIEW_CHANGES`.
+
+**The loop.** Read only the marker lines, never the diff or the review file contents:
+
+| Reviewer prints | You do |
+|---|---|
+| `REVIEW_APPROVED` | Go to step 8 |
+| `REVIEW_CHANGES` | Send the worker one line: `Read <review-file> and fix every item in it. Then print AGY_TASK_DONE.` Wait for `AGY_TASK_DONE`, then send the reviewer: `The developer has made fixes. Review again from scratch, following the same instructions.` Wait for its marker. |
+
+**Round limit:** after 3 `REVIEW_CHANGES` rounds, stop. Read the review file once, then fix it yourself or report to the user. Do not burn more quota.
+
+### 8. Final check, close the sessions, hand the worktree to the user
+
+The reviewer's approval is a claim, not proof. Check cheaply:
+
+1. `git -C <worktree> status --short` and `git -C <worktree> diff --stat`. Read the full diff only for files outside the task's "Files to change".
+2. Run the repo's tests, lint, and build yourself.
+3. If either fails, treat it as `REVIEW_CHANGES`: write the failure to the review file and send it to the worker (counts toward the round limit).
+4. Close both sessions so they stop using quota: `orca terminal close --terminal <reviewer-handle>`, then the same for `<worker-handle>`.
+5. `orca worktree set --worktree path:<worktree-path> --workspace-status in-review`.
+6. Report to the user: worktree path/name, worker and reviewer profiles, review rounds, files changed, test results you ran, open risks. Then **stop**.
 
 **Do not** commit, push, open a PR, merge, or remove the worktree unless the user asks. They review the worktree in Orca and decide. Only when they say so: commit/PR/merge as the repo expects, then `orca worktree rm --worktree path:<worktree-path> --force --json` and `git branch -d <branch>` if merged.
 
