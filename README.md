@@ -120,10 +120,10 @@ Script symlink từng skill vào:
 Trong Orca, khi bạn bảo "giao cho AGY", coordinator (Claude/Codex) sẽ theo skill `agyp`:
 1. Chọn profile còn nhiều quota nhất (`agyp usage --json`). Các task song song dùng profile khác nhau.
 2. Tạo một worktree Orca cho mỗi task (`orca worktree create`, không kèm `--agent`). Comment của worktree ghi profile và task.
-3. Trong terminal sẵn có của worktree, chạy `agyp exec <profile> -- -i "<prompt>"`. AGY mở TUI và chạy prompt luôn, bạn xem trực tiếp được. Tên terminal là `AGY <profile> · <task>`.
-4. Coordinator theo dõi bằng `orca terminal wait/read`. Khi thấy dòng `AGY_TASK_DONE`, nó review diff, chạy test, rồi tự commit và merge.
+3. Trong terminal sẵn có của worktree, chạy `agyp exec <profile> -- --model gemini-3.8-flash-high -i "<prompt>"`. AGY mở TUI và chạy prompt luôn, bạn xem trực tiếp được. Tên terminal là `AGY <profile> · <task>`.
+4. Coordinator theo dõi bằng `orca terminal wait/read`. Khi thấy dòng `AGY_TASK_DONE`, nó review diff, chạy test, đóng session AGY, rồi để worktree lại cho bạn review. Không tự commit, tạo PR hay xoá worktree.
 
-Không có Orca thì skill dùng `agyp task` (headless, trả JSON).
+Skill chỉ chạy qua Orca. Orca chưa sẵn sàng thì coordinator dừng và báo bạn.
 
 ---
 

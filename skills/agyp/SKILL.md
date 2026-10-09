@@ -26,7 +26,7 @@ description: Use when delegating, assigning, or handing off coding work to AGY, 
 
 ## Workflow in Orca
 
-Use this when `orca status --json` reports the runtime as `ready` and the repo shows up in `orca repo list --json`. Otherwise use "Without Orca" below.
+Use this when `orca status --json` reports the runtime as `ready` and the repo shows up in `orca repo list --json`. Otherwise stop and tell the user Orca isn't ready; there is no other way to run AGY tasks.
 
 ### 1. Clarify, then pick profiles
 
@@ -160,23 +160,6 @@ To send a follow-up instruction to the same session: `orca terminal send --termi
 ## Quota exhausted
 
 Keep the task on its profile and inspect `git -C <worktree> status`. Report the blocker to the user. Moving the same task to another profile requires the user's explicit OK, because the first run's partial edits are still in the worktree. Choosing a different profile for a *new* task is always fine.
-
-## Without Orca: headless
-
-Create a linked worktree, then run AGY non-interactively and read the JSON result:
-
-```bash
-git -C <repo> worktree add -b agy/<slug> <repo>-wt/agy-<slug>
-agyp task --profile <profile> --worktree <worktree-path> --prompt-file <prompt-file> --timeout 30m --model gemini-3.8-flash-high --json
-```
-
-- Use the same prompt contract as step 4. You can drop the `AGY_TASK_DONE` line.
-- Headless mode denies every shell command unless `--skip-permissions` is passed. Pass it only if the user allows it. Otherwise tell AGY not to run commands, and run the tests yourself.
-- Result fields:
-  - `status: "success"` with exit code `0` means AGY finished; `stdout` holds its report.
-  - Other outcomes set `failure_kind`: `unauthenticated` (exit 2), `quota_exhausted`, `empty_output`, or `timeout`.
-  - With `empty_output`, if `stderr` mentions the `"command" permission`, AGY tried to run a shell command and was blocked.
-- Run parallel tasks as background jobs with one output file each. Clean up with `git worktree remove <path>` and `git branch -d <branch>`.
 
 ## Other commands
 
