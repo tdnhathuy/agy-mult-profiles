@@ -121,7 +121,7 @@ Trong Orca, khi bạn bảo "giao cho AGY" kèm requirement, coordinator (Cursor
 0. Load các skill liên quan tới requirement (performance, debugging, superpowers brainstorming… nếu có), đọc code, rồi đưa bạn một bản chốt gồm cách hiểu requirement và danh sách task. Đây là lần hỏi duy nhất. Chốt xong nó tự viết prompt chi tiết và giao hết, chỉ đợi kết quả.
 1. Chọn profile còn nhiều quota nhất (`agyp usage --json`). Các task song song dùng profile khác nhau.
 2. Tạo một worktree Orca cho mỗi task (`orca worktree create`, không kèm `--agent`). Comment của worktree ghi profile và task.
-3. Trong terminal sẵn có của worktree, chạy `agyp exec <profile> -- --model gemini-3.8-flash-high -i "<prompt>"`. AGY mở TUI và chạy prompt luôn, bạn xem trực tiếp được. Tên terminal là `AGY <profile> · <task>`.
+3. Trong terminal sẵn có của worktree, chạy `agyp exec <profile> -- --dangerously-skip-permissions --model gemini-3.8-flash-high -i "<prompt>"`. AGY mở TUI và chạy prompt luôn, bạn xem trực tiếp được. Tên terminal là `AGY <profile> · <task>`.
 4. Coordinator theo dõi bằng `orca terminal wait/read`. Khi thấy dòng `AGY_TASK_DONE`, nó mở một session AGY reviewer (ưu tiên profile khác, hết thì dùng session mới cùng profile) ở pane bên cạnh. Reviewer và worker sửa qua lại tới khi `REVIEW_APPROVED` (tối đa 3 vòng). Coordinator chỉ đọc marker, không đọc diff.
 5. Khi được approve, coordinator chạy test và xem `git diff --stat` một lần, đóng cả hai session, rồi để worktree lại cho bạn review. Không tự commit, tạo PR hay xoá worktree.
 

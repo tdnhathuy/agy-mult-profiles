@@ -22,7 +22,6 @@ description: Use when the user gives a requirement to be planned and delegated t
 | `orca worktree create --agent antigravity`, `orca orchestration worker-start --agent antigravity` | Launches plain `agy` on one account; ignores all other profiles | `orca worktree create` **without** `--agent`, then `agyp exec <profile>` in its terminal |
 | `orca terminal create …` for the worker | Adds a second terminal next to the one Orca already made | Reuse the worktree's existing terminal; only the reviewer gets a split pane (step 7) |
 | raw `agy` | Uses the single system login | `agyp exec <profile> -- …` |
-| `--dangerously-skip-permissions` | Not needed: trusting the worktree already allows read/edit/run inside it | Answer the trust prompt (step 5) |
 
 ## Workflow in Orca
 
@@ -116,12 +115,14 @@ Launch AGY in the worktree's terminal. `-i` starts the interactive TUI and submi
 
 ```bash
 orca terminal send --terminal <handle> --enter \
-  --text 'agyp exec <profile> -- --model gemini-3.8-flash-high -i "Read <prompt-file> and follow every instruction in it."'
+  --text 'agyp exec <profile> -- --dangerously-skip-permissions --model gemini-3.8-flash-high -i "Read <prompt-file> and follow every instruction in it."'
 ```
 
 Change the model only if the user asks; `agy models` lists the options.
 
 ### 5. Answer the one-time trust prompt
+
+Workers and reviewers run with `--dangerously-skip-permissions` (yolo), so tool approvals never block them. The trust prompt below may still appear; handle it only if the screen shows it.
 
 AGY asks "Do you trust the contents of this project?" once per new worktree. The first `wait` returns `blockedReason: "agent-trust-workspace"`:
 
@@ -192,7 +193,7 @@ Then print exactly one final line:
 orca terminal split --terminal <worker-handle> --direction vertical --json   # reviewer handle in the result (or: orca terminal list)
 orca terminal rename --terminal <reviewer-handle> --title "AGY <reviewer-profile> · review <slug>"
 orca terminal send --terminal <reviewer-handle> --enter \
-  --text 'agyp exec <reviewer-profile> -- --model gemini-3.8-flash-high -i "Read <review-prompt-file> and follow every instruction in it."'
+  --text 'agyp exec <reviewer-profile> -- --dangerously-skip-permissions --model gemini-3.8-flash-high -i "Read <review-prompt-file> and follow every instruction in it."'
 ```
 
 A different profile asks the trust question again: answer it as in step 5. Then wait as in step 6, but for `REVIEW_APPROVED` or `REVIEW_CHANGES`.
