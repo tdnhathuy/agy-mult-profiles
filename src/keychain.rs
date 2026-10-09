@@ -527,6 +527,37 @@ fn verify_isolated_keychain(home: &IsolatedProfileHome, deadline: Instant) -> Re
     Ok(())
 }
 
+/// AGY loads shared skills from `<profile>/skills`, not from the mirrored HOME. Link it to the
+/// user's `~/.agents/skills` so every profile sees the same skills (agyp, orca-cli, ...).
+/// A real directory the user created there is left alone; a stale link is repointed.
+fn link_shared_skills(profile_dir: &Path, real_home: &Path) -> Result<(), String> {
+    let source = real_home.join(".agents").join("skills");
+    if !source.is_dir() {
+        return Ok(());
+    }
+    let link = profile_dir.join("skills");
+    match fs::symlink_metadata(&link) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            if fs::read_link(&link)
+                .map_err(|e| format!("Failed to read {}: {e}", link.display()))?
+                == source
+            {
+                return Ok(());
+            }
+            fs::remove_file(&link)
+                .map_err(|e| format!("Failed to replace {}: {e}", link.display()))?;
+        }
+        Ok(_) => return Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("Failed to inspect {}: {e}", link.display())),
+    }
+    match std::os::unix::fs::symlink(&source, &link) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(format!("Failed to link {}: {e}", link.display())),
+    }
+}
+
 /// Creates (or refreshes) the profile's isolated HOME and unlocks its private Keychain.
 /// Must be called while holding the profile lock.
 pub fn prepare_isolated_home(
@@ -557,6 +588,8 @@ pub fn prepare_isolated_home_mirroring(
     if real_library.is_dir() {
         mirror_entries(&real_library, &library, LIBRARY_PRIVATE_ENTRIES)?;
     }
+
+    link_shared_skills(profile_dir, real_home)?;
 
     let home = IsolatedProfileHome {
         keychain: library.join("Keychains").join("login.keychain-db"),

@@ -474,3 +474,27 @@ fn test_isolated_activation_releases_lock_and_shares_profile_keychain() {
         "refreshed-token"
     );
 }
+
+#[test]
+fn test_prepare_isolated_home_links_shared_skills_into_profile() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let fx = Fixture::new();
+    let _path = fx.path_guard();
+    let skills = fx.real_home.join(".agents").join("skills");
+    fs::create_dir_all(skills.join("agyp")).unwrap();
+
+    prepare_isolated_home_mirroring(&fx.profile_dir, &fx.real_home, deadline()).unwrap();
+    let link = fx.profile_dir.join("skills");
+    assert_eq!(fs::read_link(&link).unwrap(), skills);
+    assert!(link.join("agyp").is_dir());
+
+    // Idempotent, and a real directory the user created is never replaced.
+    prepare_isolated_home_mirroring(&fx.profile_dir, &fx.real_home, deadline()).unwrap();
+    fs::remove_file(&link).unwrap();
+    fs::create_dir(&link).unwrap();
+    prepare_isolated_home_mirroring(&fx.profile_dir, &fx.real_home, deadline()).unwrap();
+    assert!(!fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+}
