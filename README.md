@@ -1,224 +1,233 @@
-# agyp - Antigravity Multi-Profile CLI
+# agyp & codexp — multi-account CLIs for Antigravity and Codex
 
-CLI tool written in Rust to manage multiple Google Antigravity (`agy`) accounts and profiles with full credential isolation on macOS. Specifically designed for **Developers** and **AI Agents (such as Hermes)** to execute isolated prompts across multiple accounts non-interactively.
+Run [Google Antigravity](https://antigravity.google/) (`agy`) and [OpenAI Codex CLI](https://github.com/openai/codex) (`codex`) under several accounts on one Mac, with each account's credentials fully isolated.
 
----
+- **`agyp`** manages multiple `agy` accounts. Every profile gets its own HOME and its own macOS Keychain, so logins never collide and profiles can run in parallel.
+- **`codexp`** runs `codex` under multiple imported ChatGPT accounts, one `CODEX_HOME` per profile.
 
-## ⚡ Highlights
+Both are built for **developers and AI agents** (Claude Code, Codex, Hermes, Orca, …) that need to delegate prompts or coding tasks to a specific account non-interactively and parse the result.
 
-- **True macOS Keychain Isolation**: Solves `agy`'s global Keychain auto-login collision by giving every profile its own isolated HOME and private Keychain (`~/.gemini-profiles/homes/<name>/`).
-- **Parallel Profiles**: Different profiles run concurrently (per-profile locks); the shared system Keychain is never swapped.
-- **Seamless Browser OAuth**: Login runs inside the profile's isolated HOME, so Google displays the account selection screen without touching the system Keychain.
-- **AI Agent-First Ergonomics**:
-  - Non-interactive prompts keep AGY permission checks enabled by default; `--skip-permissions` is explicit.
-  - Zero wrapper noise: clean stdout streaming.
-  - `--json` output support for programmatic agent parsing.
-  - Exit code contracts (`0` = success, `1` = not found/invalid, `2` = unauthenticated, `127` = binary missing).
-- **Aliases**: Map short handles (`p1`, `work`, `personal`) to profiles.
+> **Unofficial.** This project is not affiliated with or endorsed by Google or OpenAI. You are responsible for following the terms of service of the accounts you use with it.
 
 ---
 
-## 🛠️ Mac Mini Setup Guide (Dành cho User)
+## Highlights
 
-> **Lưu ý:** Bạn chỉ cần thực hiện các bước cài đặt và login dưới đây 1 lần trên Mac Mini. Sau khi hoàn tất, Hermes có thể tự động gọi `agyp` hoàn toàn độc lập.
+- **Real Keychain isolation (macOS).** `agy` reads its token from one fixed Keychain item, so normally only one account can be logged in at a time. `agyp` gives every profile a private HOME and Keychain under `~/.gemini-profiles/homes/<name>/`. The system Keychain is never touched.
+- **Parallel profiles.** Locks are per profile and held only for a few seconds, so different profiles (and even several runs of the same profile) can work at the same time.
+- **Browser OAuth per profile.** `agyp login <name>` runs the OAuth flow inside the profile's own HOME, so Google shows the account picker instead of reusing your current login.
+- **Agent-friendly output.**
+  - Clean stdout with no wrapper noise.
+  - `--json` on the commands agents care about.
+  - Stable exit codes: `0` success, `1` not found / invalid input, `2` unauthenticated, `127` `agy` binary missing.
+  - `agyp task` / `codexp task` run in a Git linked worktree with a hard timeout, concurrent stream draining and a structured failure classification.
+- **Safe defaults.** AGY permission prompts stay on unless you pass `--skip-permissions` (only allowed inside a worktree). Profiles are never rotated automatically on `429` / quota errors.
+- **Quota at a glance.** `agyp q` and `codexp q` show the remaining Gemini / GPT / Codex quota for every profile.
+- **Aliases.** Map short handles such as `p1` or `work` to profiles.
+- **Agent skills included.** `skills/agyp` and `skills/codexp` teach coding agents how to hand work to these CLIs.
 
-### 1. Cài đặt Prerequisites
-Đảm bảo Mac Mini đã cài Rust/Cargo và Antigravity CLI (`agy`):
+---
+
+## Requirements
+
+- macOS (Keychain isolation relies on `/usr/bin/security`)
+- [Rust](https://rustup.rs/) toolchain (to build)
+- `agy` on your `PATH` for `agyp`
+- `codex` on your `PATH` for `codexp`
+
+## Installation
+
 ```bash
-# Kiểm tra agy
-which agy
-agy --version
-
-# Kiểm tra Rust (nếu chưa có: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh)
-rustc --version
-cargo --version
-```
-
-### 2. Clone Repository & Build Install
-```bash
-git clone git@github.com:tdnhathuy/agy-mult-profiles.git
+git clone https://github.com/tdnhathuy/agy-mult-profiles.git
 cd agy-mult-profiles
-
-# Build release và copy binary vào ~/.local/bin/agyp
-make install
+make install          # builds release binaries and copies agyp + codexp to ~/.local/bin
 ```
 
-Đảm bảo `~/.local/bin` đã có trong `$PATH` (thêm vào `~/.zshrc` nếu chưa có):
+Make sure `~/.local/bin` is on your `PATH`:
+
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
-```
-
-Kiểm tra:
-```bash
 agyp --version
+codexp --version
 ```
 
 ---
 
-## 🔐 Đăng nhập các Profile (User làm một lần)
+## agyp quick start
 
-### 1. Import tài khoản hiện tại làm Profile `default`
-Nếu trên máy đã đăng nhập sẵn 1 tài khoản `agy`:
+### 1. Add profiles
+
+Import the account `agy` is already logged in with:
+
 ```bash
 agyp login default --import-current
 ```
 
-### 2. Đăng nhập thêm Profile mới (Profile 1, Profile 2,...)
-Chạy lệnh đăng nhập cho từng profile:
+Add more accounts. Each command opens the Google OAuth page in your browser; pick the account you want for that profile:
+
 ```bash
 agyp login profile-1
-```
-👉 `agyp` sẽ tự động mở trình duyệt với trang Google OAuth. Hãy chọn tài khoản Google tương ứng và bấm cho phép.
-
-Tiếp tục với tài khoản tiếp theo:
-```bash
 agyp login profile-2
 ```
 
-### 3. Đặt Alias cho dễ gọi
-Gán các alias ngắn gọn để Hermes hoặc bạn dễ gọi:
+The profile is registered as soon as OAuth finishes and is usable right away.
+
+### 2. Set aliases (optional)
+
 ```bash
 agyp alias set p1 profile-1
 agyp alias set p2 profile-2
 ```
 
-### 4. Kiểm tra trạng thái
+### 3. Check status
+
 ```bash
 agyp list
 ```
-Kết quả hiển thị:
+
 ```text
-PROFILE         EMAIL                          ALIASES         DEFAULT    STATUS         
+PROFILE         EMAIL                          ALIASES         DEFAULT    STATUS
 ------------------------------------------------------------------------------------------
-default         user1@gmail.com                -               yes (*)    ready          
-profile-1       user2@gmail.com                p1              no         ready          
-profile-2       user3@gmail.com                p2              no         ready          
+default         user1@gmail.com                -               yes (*)    ready
+profile-1       user2@gmail.com                p1              no         ready
+profile-2       user3@gmail.com                p2              no         ready
 ```
 
----
-
-## 🧠 Cài Agent Skills (Claude, Codex/GPT, Orca, AGY)
-
-Repo có sẵn 2 skill: `skills/agyp` (giao việc cho AGY qua nhiều account) và `skills/codexp` (giao việc cho Codex qua nhiều account). Cài global cho mọi agent bằng một lệnh:
+### 4. Use it
 
 ```bash
-make install-skills            # = bash scripts/install-skills.sh
+agyp q                                   # remaining quota for every profile
+agyp prompt p1 "Summarize this repo"     # one-off prompt
+agyp exec p2                             # open the agy TUI as profile-2
+agyp exec p2 -- --model gemini-2.5-flash -i "Fix the failing test"
+
+# Autonomous coding task in an isolated Git linked worktree
+git worktree add ../wt-fix -b fix/flaky-test
+agyp task --profile p1 --worktree ../wt-fix --prompt-file prompt.md --timeout 30m --json
 ```
-
-Script symlink từng skill vào:
-
-| Thư mục | Agent |
-| :--- | :--- |
-| `~/.agents/skills` | Codex (GPT) và các agent đọc thư mục skill chung |
-| `~/.claude/skills` | Claude Code (bỏ qua nếu chưa cài) |
-| `~/.gemini/antigravity/skills` | Antigravity / Hermes (bỏ qua nếu chưa cài) |
-
-- Vì là symlink nên chỉ cần `git pull` là mọi agent dùng bản mới. Mở lại session agent để nạp skill.
-- Bản skill cũ không phải symlink sẽ được đổi tên thành `<tên>.bak-<thời gian>`, không bị xoá.
-- Tuỳ chọn: `--copy` (copy thay vì symlink), `--dry-run`, `--target <dir>`, chỉ định skill (`scripts/install-skills.sh agyp`), gỡ bằng `make uninstall-skills`.
-
-Trong Orca, khi bạn bảo "giao cho AGY" kèm requirement, coordinator (Cursor/Claude/Codex…) sẽ theo skill `agyp`:
-0. Load các skill liên quan tới requirement (performance, debugging, superpowers brainstorming… nếu có), đọc code, rồi đưa bạn một bản chốt gồm cách hiểu requirement và danh sách task. Đây là lần hỏi duy nhất. Chốt xong nó tự viết prompt chi tiết và giao hết, chỉ đợi kết quả.
-1. Chọn profile còn nhiều quota nhất (`agyp usage --json`). Các task song song dùng profile khác nhau.
-2. Tạo một worktree Orca cho mỗi task (`orca worktree create`, không kèm `--agent`). Comment của worktree ghi profile và task.
-3. Trong terminal sẵn có của worktree, chạy `agyp exec <profile> -- --dangerously-skip-permissions --model gemini-3.8-flash-high -i "<prompt>"`. AGY mở TUI và chạy prompt luôn, bạn xem trực tiếp được. Tên terminal là `AGY <profile> · <task>`.
-4. Coordinator theo dõi bằng `orca terminal wait/read`. Khi thấy dòng `AGY_TASK_DONE`, nó mở một session AGY reviewer (ưu tiên profile khác, hết thì dùng session mới cùng profile) ở pane bên cạnh. Reviewer và worker sửa qua lại tới khi `REVIEW_APPROVED` (tối đa 3 vòng). Coordinator chỉ đọc marker, không đọc diff.
-5. Khi được approve, coordinator chạy test và xem `git diff --stat` một lần, đóng cả hai session, rồi để worktree lại cho bạn review. Không tự commit, tạo PR hay xoá worktree.
-
-Skill chỉ chạy qua Orca. Orca chưa sẵn sàng thì coordinator dừng và báo bạn.
 
 ---
 
-## 🤖 Hướng dẫn tích hợp cho Hermes (AI Agent)
+## agyp command reference
 
-Hermes có thể tương tác với `agyp` qua terminal/bash tool.
+| Command | Description |
+| :--- | :--- |
+| `agyp login <name>` | Log in a new account via browser OAuth |
+| `agyp login <name> --import-current` | Import the account `agy` is currently logged in with |
+| `agyp list [--json]` | List profiles, emails, aliases and status |
+| `agyp default [name]` | Show or change the default profile |
+| `agyp rm <name> [-y]` | Remove a profile and its data |
+| `agyp alias set <alias> <profile>` | Create an alias |
+| `agyp alias rm <alias>` / `agyp alias list` | Remove / list aliases |
+| `agyp prompt <profile> "<text>"` | Send a prompt (reads stdin if the text is omitted). Options: `--model`, `--add-dir`, `--skip-permissions`, `--json` |
+| `agyp task --profile <p> --worktree <path>` | Run an autonomous task in a Git linked worktree. Options: `--prompt-file`, `--timeout` (default `20m`), `--model`, `--skip-permissions`, `--json` |
+| `agyp exec <profile> [-- <args...>]` | Pass arbitrary arguments to `agy` under a profile |
+| `agyp q [profile]` / `agyp usage [profile]` | Gemini and GPT quota: remaining %, usage bar, time until reset. `--json`, `--hide-gpt` |
+| `agyp quota --profile <p>` / `--all` | Same quota view; with `--json` it runs a minimal health probe (cached 5 min, `--no-cache`, `--timeout`) |
 
-### 1. Cài đặt Agent Skill cho Hermes
-Chạy `make install-skills` (xem phần trên). Skill được link vào `~/.gemini/antigravity/skills/agyp`.
+Use `agyp task` for coding work. `agyp prompt` has no worktree isolation, deadline or failure classification, so keep it for non-coding prompts.
 
-### 2. System Prompt / Instruction mẫu cho Hermes
-Copy đoạn sau vào System Prompt hoặc Custom Instructions của Hermes:
+---
+
+## How the isolation works
+
+- `agy` reads its token from a single Keychain item (`service=gemini`, `account=antigravity`) via `/usr/bin/security`, and `security` picks the Keychain based on `$HOME`. So `agyp` gives each profile its own HOME at `~/.gemini-profiles/homes/<name>/`:
+  - `Library/Keychains/login.keychain-db` is the profile's private Keychain. Its random password is stored in `~/.gemini-profiles/profiles/<name>/keychain_password`, and it does not auto-lock.
+  - Everything else from your real HOME (`.gitconfig`, `.ssh`, `.config`, `.gemini`, `Library/*`, …) is symlinked, so git, npm and other tools keep working inside tasks. Only `Library/Keychains` and `Library/Preferences` are private.
+  - Before every run, `agyp` verifies that the Keychain search list and default Keychain under the private HOME point only at the profile's Keychain, and refuses to run otherwise.
+- The private Keychain is the source of truth for the profile's token. The first run seeds it from `~/.gemini-profiles/profiles/<name>/keychain_token.json`; `agy` refreshes the token inside the private Keychain, and `agyp` backs it up to `keychain_token.json` after every run.
+- Per-profile locks (`~/.gemini-profiles/locks/<name>.lock`) are held only while the Keychain is prepared. If a profile is busy you will see `... is in use by another agyp command; waiting...`.
+
+**Caveat:** tools inside a task that store credentials in the macOS Keychain (for example `gh`, or git over HTTPS with `osxkeychain`) will not see the credentials from your real login Keychain. Use SSH for git and `GH_TOKEN` for `gh`.
+
+---
+
+## codexp — Codex CLI with multiple ChatGPT accounts
+
+`codexp` is installed alongside `agyp` by `make install`. Each profile gets its own `CODEX_HOME` at `~/.codex-profiles/homes/<name>/`. No Keychain is involved, so profiles run in parallel freely.
+
+**`codexp` never logs in and never refreshes tokens.** You log the account in somewhere else (for example an account manager such as OmniRoute), export its Codex `auth.json`, and import that file:
+
+```bash
+codexp import c1 --from ~/Downloads/auth-a.json --remove-source
+codexp list
+codexp q                     # Codex quota for every profile (5-hour and weekly windows)
+codexp exec c1               # open the Codex TUI as c1
+codexp task --profile c1 --worktree ../wt-a --prompt-file prompt.md --timeout 30m --json
+```
+
+| Command | Description |
+| :--- | :--- |
+| `codexp import <name> --from <file>` | Import or refresh a profile from an exported `auth.json`. `--force`, `--remove-source` |
+| `codexp list` | List profiles and token validity |
+| `codexp rm <name>` | Remove a profile and its `CODEX_HOME` |
+| `codexp alias ...` | Manage aliases |
+| `codexp task --profile <p> --worktree <path>` | Run `codex exec` in a Git linked worktree. Options: `--prompt-file`, `--timeout`, `--model`, `--reasoning-effort`, `--sandbox` (default `workspace-write`), `--resume <thread_id>`, `--json` |
+| `codexp q [profile] [--json]` | Read-only ChatGPT usage query (same source as Codex `/status`) |
+| `codexp exec <profile> [-- <args...>]` | Run any `codex` command under a profile |
+
+How it protects the upstream session:
+
+- On import the refresh token is replaced with a dummy value and Codex's refresh/revoke endpoints are pointed at a dead address, so `codexp` can never rotate or revoke the token the upstream owner is still using.
+- The trade-off: when the access token expires (roughly 7–10 days), the profile reports `unauthenticated` (exit code `2`). Export a fresh file and run `codexp import <name> --from <file>` again.
+- Import rejects files whose `id_token` / `access_token` / `account_id` belong to different accounts, expired files, switching the account inside an existing profile, and importing the same account twice (unless `--force`).
+- Shared Codex config lives at `~/.codex-profiles/config.toml`. `codexp` always forces `model_provider="openai"`, `cli_auth_credentials_store="file"` and `forced_login_method="chatgpt"`. `AGENTS.md`, `skills` and `rules` are symlinked from `~/.codex`.
+
+---
+
+## Agent skills
+
+The repo ships two skills for coding agents:
+
+- `skills/agyp` — plan a requirement and delegate it to AGY across several accounts.
+- `skills/codexp` — delegate coding tasks to Codex workers pinned to specific accounts.
+
+Install them for every agent on the machine:
+
+```bash
+make install-skills          # same as: bash scripts/install-skills.sh
+```
+
+The script symlinks each skill into:
+
+| Directory | Agent |
+| :--- | :--- |
+| `~/.agents/skills` | Codex and other agents that read the shared skills folder |
+| `~/.claude/skills` | Claude Code (skipped if not installed) |
+| `~/.gemini/antigravity/skills` | Antigravity / Hermes (skipped if not installed) |
+
+- Because they are symlinks, a `git pull` updates every agent. Restart the agent session to reload skills.
+- An existing non-symlink skill with the same name is renamed to `<name>.bak-<timestamp>`, never deleted.
+- Options: `--copy` (copy instead of symlink), `--dry-run`, `--target <dir>`, install only some skills (`scripts/install-skills.sh agyp`). Remove them with `make uninstall-skills`.
+
+The `agyp` skill is written for the Orca worktree manager: the coordinator agent confirms a task list with you once, creates one Orca worktree per task, runs `agyp exec` in it on the profile with the most quota left, has a second AGY session review the result, and leaves the worktree for you to review. It never commits, opens PRs or deletes worktrees on its own.
+
+### Using agyp from a custom agent (e.g. Hermes)
+
+See [HERMES_GUIDE.md](HERMES_GUIDE.md) for a full guide. A minimal system-prompt snippet:
 
 ```markdown
 You have access to `agyp` (Antigravity Multi-Profile CLI).
-Use `agyp` whenever you need to execute prompts or tasks via Google Antigravity using specific accounts.
 
-Rules for Hermes:
-1. To see available profiles and their statuses:
-   `agyp list --json`
-2. Check quota availability before assigning tasks:
-   `agyp quota --all --json`
-   (Note: Uses a minimal observed-health probe; cached for 5m; `--timeout` is one total deadline for the whole sequential run; never rotates profiles automatically on 429).
-   For a quick Gemini-only percentage check with Vietnam reset times:
-   `agyp q` (all profiles) or `agyp q <profile>`. Output includes each profile's email. Each profile has a 60-second transaction deadline; timeouts are reported without automatic retry or profile switching.
-3. For coding tasks, ALWAYS use `agyp task` in an isolated Git linked worktree:
-   `agyp task --profile <profile> --worktree <worktree-path> --prompt-file <path> --timeout <duration> --json`
-   Or pipe prompt via stdin:
-   `cat prompt.txt | agyp task --profile <profile> --worktree <worktree-path> --timeout <duration> --json`
-   `agyp task` strictly isolates credentials, validates the linked worktree, drains streams concurrently to avoid deadlocks, enforces execution deadlines, and produces structured JSON output.
-3. Use `agyp prompt <profile> "<instruction>"` ONLY for non-coding or basic interactive use.
-   Do NOT use `agyp prompt` for coding delegation: it lacks linked-worktree isolation, stream deadlocking protections, deadline timeouts, and structured failure classification.
-4. If a command returns exit code 2 (unauthenticated):
-   Notify the user to run `agyp login <profile>` in an interactive terminal.
-5. Rate Limit Handling:
-   If the selected profile encounters Resource Exhausted / 429, keep it pinned, inspect worktree state before any retry, and report the blocker. Never switch profiles automatically.
+1. List profiles: `agyp list --json`
+2. Check quota before assigning work: `agyp quota --all --json` or `agyp q`
+3. For coding tasks, always use an isolated Git linked worktree:
+   `agyp task --profile <profile> --worktree <path> --prompt-file <file> --timeout <duration> --json`
+4. Use `agyp prompt <profile> "<text>"` only for non-coding prompts.
+5. Exit code 2 means the profile is unauthenticated: ask the user to run `agyp login <profile>`.
+6. On 429 / resource exhausted, keep the profile pinned, inspect the worktree, and report.
+   Never switch profiles automatically.
 ```
 
 ---
 
-## 📖 CLI Commands Reference
-
-| Lệnh | Mô tả |
-| :--- | :--- |
-| `agyp q` / `agyp quota --all` | Quota Gemini + GPT: %, thanh usage, còn bao lâu. `--hide-gpt` ẩn GPT |
-| `agyp quota --profile <p>` / `--all` | Log quota Gemini + GPT (profile, email, 5 giờ, 5 ngày, reset). `--json` vẫn là probe |
-| `agyp task --profile <p> --worktree <path>` | Chạy task tự động trong Git linked worktree với stream draining, timeout & JSON classification |
-| `agyp login <name>` | Đăng nhập tài khoản mới qua trình duyệt OAuth |
-| `agyp login <name> --import-current` | Import phiên đăng nhập hiện tại từ macOS Keychain |
-| `agyp list` / `agyp list --json` | Liệt kê các profile, email và alias |
-| `agyp default [name]` | Xem hoặc đổi profile mặc định |
-| `agyp prompt <profile> "<text>"` | Gửi prompt đến profile |
-| `agyp prompt <profile> --json "<text>"` | Nhận kết quả dạng JSON có cấu trúc |
-| `agyp prompt <profile> --model <model>` | Chọn model (`gemini-2.5-flash`,...) |
-| `agyp alias set <alias> <profile>` | Gán alias cho profile |
-| `agyp alias rm <alias>` | Xóa alias |
-| `agyp alias list` | Liệt kê các alias |
-| `agyp rm <name> [-y]` | Xóa profile và dữ liệu của profile |
-| `agyp exec <profile> -- <args...>` | Chuyển tiếp tham số tùy ý cho `agy` |
-
----
-
-## 🔒 Security & Credential Isolation
-
-- Mỗi profile lưu token riêng tại `~/.gemini-profiles/profiles/<name>/keychain_token.json`.
-- `agy` chỉ đọc token từ **một** item Keychain cố định (`service=gemini`, `account=antigravity`) qua `/usr/bin/security`, và `security` chọn Keychain dựa trên `$HOME`. Vì vậy mỗi profile có **HOME + Keychain riêng** tại `~/.gemini-profiles/homes/<name>/`:
-  - `Library/Keychains/login.keychain-db`: Keychain riêng của profile (mật khẩu ngẫu nhiên lưu trong `profiles/<name>/keychain_password`, không auto-lock).
-  - Các mục còn lại của HOME thật (`.gitconfig`, `.ssh`, `.config`, `.gemini`, `Library/*`, ...) được symlink để git/npm/... trong task vẫn hoạt động. Riêng `Library/Keychains` và `Library/Preferences` là thư mục riêng.
-  - Trước mỗi lần chạy, `agyp` kiểm tra search list/default Keychain dưới HOME riêng chỉ trỏ vào Keychain của profile; nếu không thì từ chối chạy.
-- Keychain riêng là nơi lưu token chính của profile: lần chạy đầu nạp từ `keychain_token.json`, sau đó `agy` refresh token ngay trong Keychain riêng, và `agyp` sao lưu lại vào `keychain_token.json` sau mỗi lần chạy. Keychain hệ thống **không bị đụng tới**.
-- Lock theo profile (`~/.gemini-profiles/locks/<name>.lock`) chỉ giữ vài giây lúc chuẩn bị Keychain, nên **nhiều phiên chạy song song được, kể cả trên cùng một profile**. Nếu profile đang bận, `agyp` báo `... is in use by another agyp command; waiting...`.
-- `agyp login <name>` chạy OAuth bên trong HOME riêng của profile. Ngay khi OAuth xong, profile được ghi vào registry (hiện trong `agyp ls`) và dùng được luôn, dù phiên `agy` của login vẫn đang mở.
-- Lưu ý: tool trong task dùng macOS Keychain (vd. `gh` lưu token trong Keychain, git HTTPS qua `osxkeychain`) sẽ không thấy credential của login Keychain thật. Dùng SSH cho git hoặc `GH_TOKEN` cho `gh`.
-
----
-
-## 🧩 codexp — Codex CLI multi-account
-
-`codexp` (cài cùng `make install`) chạy `codex exec` dưới nhiều account ChatGPT, mỗi profile một `CODEX_HOME` riêng ở `~/.codex-profiles/homes/<name>/`. Không cần Keychain, các profile chạy song song thoải mái.
-
-**codexp không bao giờ login hay refresh token.** Account được login ở OmniRoute, export `auth.json` rồi import vào codexp:
+## Development
 
 ```bash
-codexp import c1 --from ~/Desktop/auth-codex/auth-a@gmail.com.json --remove-source
-codexp list
-codexp task --profile c1 --worktree ../wt-a --prompt-file prompt.md --timeout 30m --json
-codexp q                  # quota Codex của mọi profile (5 giờ + 7 ngày, giờ VN)
-codexp exec c1            # mở Codex TUI bằng account c1
+make build      # cargo build --release
+make test       # cargo test
 ```
 
-- Khi import, refresh token bị thay bằng giá trị giả và endpoint refresh/revoke của Codex bị trỏ vào địa chỉ chết, nên codexp không thể làm xoay (rotate) hay thu hồi token đang dùng ở OmniRoute.
-- Đổi lại, khi access token hết hạn (~7–10 ngày) profile sẽ báo `unauthenticated` (exit 2): export lại từ OmniRoute rồi `codexp import <name> --from <file>` (cùng account thì ghi đè bình thường).
-- Import từ chối file có `id_token` / `access_token` / `account_id` không cùng một account, file đã hết hạn, và việc đổi account trong cùng profile hoặc import trùng account (trừ khi `--force`).
-- Config Codex dùng chung: `~/.codex-profiles/config.toml`. codexp luôn ép `model_provider="openai"`, `cli_auth_credentials_store="file"`, `forced_login_method="chatgpt"`. `AGENTS.md`, `skills`, `rules` được symlink từ `~/.codex`.
-- `codexp q [profile] [--json]` gọi endpoint usage của ChatGPT (cùng nguồn với `/status` của Codex) bằng access token đã import: chỉ đọc, không refresh. Gói plus có cửa sổ 5 giờ và 7 ngày, gói free có một cửa sổ 30 ngày.
-- Skill cho orchestrator: `skills/codexp/SKILL.md`.
+## License
+
+[MIT](LICENSE)
