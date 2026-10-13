@@ -1,8 +1,8 @@
 [package]
 name = "agyp"
-version = "0.4.2"
+version = "0.5.0"
 edition = "2021"
-description = "Multi-account CLIs for Google Antigravity (agyp) and OpenAI Codex (codexp) with isolated credentials"
+description = "Multi-account CLIs for Google Antigravity (agyp) and OpenAI Codex (codexp) with isolated credentials, for macOS and Linux"
 license = "MIT"
 repository = "https://github.com/tdnhathuy/agy-mult-profiles"
 readme = "README.md"

@@ -10,8 +10,9 @@ mod keychain;
 mod security;
 
 use keychain::{
-    activate_isolated_profile, activate_profile, isolated_home_dir,
-    prepare_isolated_home_mirroring, KeychainBackend, MockKeychainBackend,
+    activate_isolated_profile, activate_profile, activate_profile_store, isolated_home_dir,
+    prepare_isolated_home_mirroring, KeychainBackend, MockKeychainBackend, ProfileStore,
+    TokenFileBackend, AGY_TOKEN_FILE,
 };
 
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -497,4 +498,136 @@ fn test_prepare_isolated_home_links_shared_skills_into_profile() {
         .unwrap()
         .file_type()
         .is_symlink());
+}
+
+#[test]
+fn test_token_file_backend_round_trip_is_private_to_the_profile() {
+    let fx = Fixture::new();
+    let other_profile = fx.profile_dir.parent().unwrap().join("p2");
+    fs::create_dir_all(&other_profile).unwrap();
+    let backend = TokenFileBackend::for_profile(&fx.profile_dir);
+    let token_file = fx.profile_dir.join(AGY_TOKEN_FILE);
+    assert_eq!(backend.path(), token_file);
+
+    assert_eq!(backend.read_token().unwrap(), None);
+    backend.delete_token().unwrap();
+
+    backend.write_token("{\"token\":{}}\n").unwrap();
+    assert_eq!(fs::read_to_string(&token_file).unwrap(), "{\"token\":{}}");
+    assert_eq!(
+        fs::metadata(&token_file).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        backend.read_token().unwrap().as_deref(),
+        Some("{\"token\":{}}")
+    );
+    assert_eq!(
+        TokenFileBackend::for_profile(&other_profile)
+            .read_token()
+            .unwrap(),
+        None
+    );
+    // No staging file is left next to the token.
+    assert_eq!(
+        fs::read_dir(token_file.parent().unwrap()).unwrap().count(),
+        1
+    );
+
+    backend.delete_token().unwrap();
+    assert!(!token_file.exists());
+}
+
+#[test]
+fn test_token_file_backend_unwraps_macos_keyring_envelope() {
+    use base64::Engine;
+    let fx = Fixture::new();
+    let backend = TokenFileBackend::for_profile(&fx.profile_dir);
+    let json = "{\"token\":{\"refresh_token\":\"r\"},\"auth_method\":\"consumer\"}";
+    let wrapped = format!(
+        "go-keyring-base64:{}",
+        base64::engine::general_purpose::STANDARD.encode(json)
+    );
+
+    backend.write_token(&wrapped).unwrap();
+    assert_eq!(backend.read_token().unwrap().as_deref(), Some(json));
+}
+
+#[test]
+fn test_token_file_backend_refuses_symlinked_token_file() {
+    let fx = Fixture::new();
+    let backend = TokenFileBackend::for_profile(&fx.profile_dir);
+    let outside = fx.real_home.join("other-account-token");
+    fs::write(&outside, "other-token").unwrap();
+    fs::create_dir_all(backend.path().parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&outside, backend.path()).unwrap();
+
+    assert!(backend.read_token().unwrap_err().contains("symlink"));
+    assert!(backend.write_token("mine").unwrap_err().contains("symlink"));
+    assert!(backend.delete_token().unwrap_err().contains("symlink"));
+    assert_eq!(fs::read_to_string(&outside).unwrap(), "other-token");
+}
+
+#[test]
+fn test_token_file_activation_seeds_once_and_mirrors_refreshed_token() {
+    let fx = Fixture::new();
+    fs::write(fx.profile_dir.join("keychain_token.json"), "seed-token").unwrap();
+    let token_file = fx.profile_dir.join(AGY_TOKEN_FILE);
+    let store = || ProfileStore::TokenFile(TokenFileBackend::for_profile(&fx.profile_dir));
+    let lock_path = security::profile_lock_path(fx.profile_dir.parent().unwrap(), "p1");
+
+    // First run seeds AGY's token file and releases the profile lock right away.
+    let first = activate_profile_store::<MockKeychainBackend>(
+        &fx.profile_dir,
+        store(),
+        deadline(),
+        security::ProcessLock::acquire(&lock_path).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(fs::read_to_string(&token_file).unwrap(), "seed-token");
+
+    // AGY refreshes the file; a concurrent run of the same profile must not re-seed it.
+    fs::write(&token_file, "refreshed-token").unwrap();
+    let second_lock = security::ProcessLock::acquire_with_timeout(&lock_path, Duration::ZERO)
+        .expect("profile lock must be free while a run is in progress");
+    let second = activate_profile_store::<MockKeychainBackend>(
+        &fx.profile_dir,
+        store(),
+        deadline(),
+        second_lock,
+    )
+    .unwrap();
+    assert_eq!(fs::read_to_string(&token_file).unwrap(), "refreshed-token");
+
+    first.sync_and_restore().unwrap();
+    assert_eq!(
+        fs::read_to_string(fx.profile_dir.join("keychain_token.json")).unwrap(),
+        "refreshed-token"
+    );
+    second.sync_and_restore().unwrap();
+    assert_eq!(fs::read_to_string(&token_file).unwrap(), "refreshed-token");
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn test_apply_profile_home_pins_agy_to_file_token_storage() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let ssh_tty = |cmd: &std::process::Command| {
+        cmd.get_envs()
+            .find(|(key, _)| *key == "SSH_TTY")
+            .map(|(_, value)| value.map(|v| v.to_os_string()))
+    };
+
+    // Outside an SSH session AGY would reach for the shared desktop keyring.
+    let _conn = EnvVarGuard::set("SSH_CONNECTION", "");
+    let _tty = EnvVarGuard::set("SSH_TTY", "");
+    let mut cmd = std::process::Command::new("agy");
+    keychain::apply_profile_home(&mut cmd, None);
+    assert_eq!(ssh_tty(&cmd), Some(Some("/dev/null".into())));
+
+    // A real SSH session already makes AGY use the file; leave its environment alone.
+    let _conn = EnvVarGuard::set("SSH_CONNECTION", "10.0.0.1 1 10.0.0.2 22");
+    let mut cmd = std::process::Command::new("agy");
+    keychain::apply_profile_home(&mut cmd, None);
+    assert_eq!(ssh_tty(&cmd), None);
 }

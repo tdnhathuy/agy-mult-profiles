@@ -5,7 +5,7 @@ description: Use when the user gives a requirement to be planned and delegated t
 
 # agyp: delegate coding to AGY across many accounts
 
-`agyp` runs the Antigravity CLI (`agy`) under one of several Google accounts ("profiles"). Each profile has its own isolated HOME and Keychain, so many AGY sessions run in parallel on different accounts. More profiles = more Gemini quota.
+`agyp` runs the Antigravity CLI (`agy`) under one of several Google accounts ("profiles"). Each profile has its own isolated credential store (a private HOME and Keychain on macOS, a private token file on Linux), so many AGY sessions run in parallel on different accounts. More profiles = more Gemini quota.
 
 **You are the coordinator.** AGY only edits files in its worktree. You pick the profiles, write the prompt, relay between sessions, and do the final check. Code review is done by a second AGY session, not by you: this saves your tokens.
 
