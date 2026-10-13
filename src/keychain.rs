@@ -137,13 +137,21 @@ fn run_security_command_in(
     if let Some(home) = home {
         command.env("HOME", home);
     }
+    command.args(args);
+    run_tool_with_timeout(&mut command, "security", timeout)
+}
+
+fn run_tool_with_timeout(
+    command: &mut Command,
+    tool: &str,
+    timeout: Duration,
+) -> Result<Output, String> {
     let mut child = command
-        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("Failed to invoke security tool: {e}"))?;
+        .map_err(|e| format!("Failed to invoke {tool} tool: {e}"))?;
     let start = Instant::now();
 
     loop {
@@ -151,7 +159,7 @@ fn run_security_command_in(
             Ok(Some(_)) => {
                 return child
                     .wait_with_output()
-                    .map_err(|e| format!("Failed to collect security tool output: {e}"));
+                    .map_err(|e| format!("Failed to collect {tool} tool output: {e}"));
             }
             Ok(None) if start.elapsed() >= timeout => {
                 let _ = child.kill();
@@ -162,7 +170,7 @@ fn run_security_command_in(
             Err(e) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("Failed while waiting for security tool: {e}"));
+                return Err(format!("Failed while waiting for {tool} tool: {e}"));
             }
         }
     }
@@ -742,12 +750,165 @@ impl KeychainBackend for IsolatedKeychainBackend {
     }
 }
 
+/// AGY's file-based token storage, relative to the profile (`--gemini_dir`) directory. Off macOS
+/// AGY keeps its credential here whenever it does not use the desktop keyring.
+pub const AGY_TOKEN_FILE: &str = "antigravity-cli/antigravity-oauth-token";
+
+/// Reads and writes AGY's token file inside one profile directory. Each profile has its own
+/// `--gemini_dir`, so the file is private to the profile without any HOME or keyring tricks.
+#[derive(Debug, Clone)]
+pub struct TokenFileBackend {
+    path: PathBuf,
+}
+
+impl TokenFileBackend {
+    pub fn for_profile(profile_dir: &Path) -> Self {
+        Self {
+            path: profile_dir.join(AGY_TOKEN_FILE),
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// AGY's token file holds plain JSON, while a token saved from the macOS Keychain carries
+/// go-keyring's base64 envelope. Unwrap it so profiles copied over from a Mac keep working.
+fn plain_token_json(token: &str) -> String {
+    let trimmed = token.trim();
+    trimmed
+        .strip_prefix("go-keyring-base64:")
+        .and_then(|encoded| STANDARD.decode(encoded).ok())
+        .and_then(|decoded| String::from_utf8(decoded).ok())
+        .unwrap_or_else(|| trimmed.to_string())
+}
+
+impl KeychainBackend for TokenFileBackend {
+    fn read_token(&self) -> Result<Option<String>, String> {
+        crate::security::reject_symlink(&self.path).map_err(|e| e.to_string())?;
+        match fs::read_to_string(&self.path) {
+            Ok(content) => {
+                let token = content.trim();
+                Ok((!token.is_empty()).then(|| token.to_string()))
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("Failed to read profile token file: {e}")),
+        }
+    }
+
+    fn write_token(&self, token: &str) -> Result<(), String> {
+        crate::security::reject_symlink(&self.path).map_err(|e| e.to_string())?;
+        // Write-then-rename so a running AGY never reads a half-written token.
+        let staged = self
+            .path
+            .with_extension(format!("agyp-tmp-{}", std::process::id()));
+        crate::security::write_private_file(&staged, plain_token_json(token).as_bytes())
+            .and_then(|()| fs::rename(&staged, &self.path))
+            .map_err(|e| {
+                let _ = fs::remove_file(&staged);
+                format!("Failed to write profile token file: {e}")
+            })
+    }
+
+    fn delete_token(&self) -> Result<(), String> {
+        crate::security::reject_symlink(&self.path).map_err(|e| e.to_string())?;
+        match fs::remove_file(&self.path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!("Failed to delete profile token file: {e}")),
+        }
+    }
+}
+
+/// A profile's own credential store: its private Keychain on macOS, AGY's token file elsewhere.
+#[derive(Debug, Clone)]
+pub enum ProfileStore {
+    Keychain(IsolatedKeychainBackend),
+    TokenFile(TokenFileBackend),
+}
+
+impl KeychainBackend for ProfileStore {
+    fn read_token(&self) -> Result<Option<String>, String> {
+        match self {
+            Self::Keychain(b) => b.read_token(),
+            Self::TokenFile(b) => b.read_token(),
+        }
+    }
+
+    fn write_token(&self, token: &str) -> Result<(), String> {
+        match self {
+            Self::Keychain(b) => b.write_token(token),
+            Self::TokenFile(b) => b.write_token(token),
+        }
+    }
+
+    fn delete_token(&self) -> Result<(), String> {
+        match self {
+            Self::Keychain(b) => b.delete_token(),
+            Self::TokenFile(b) => b.delete_token(),
+        }
+    }
+
+    fn read_token_until(&self, deadline: Instant) -> Result<Option<String>, String> {
+        match self {
+            Self::Keychain(b) => b.read_token_until(deadline),
+            Self::TokenFile(b) => b.read_token_until(deadline),
+        }
+    }
+
+    fn write_token_until(&self, token: &str, deadline: Instant) -> Result<(), String> {
+        match self {
+            Self::Keychain(b) => b.write_token_until(token, deadline),
+            Self::TokenFile(b) => b.write_token_until(token, deadline),
+        }
+    }
+
+    fn delete_token_until(&self, deadline: Instant) -> Result<(), String> {
+        match self {
+            Self::Keychain(b) => b.delete_token_until(deadline),
+            Self::TokenFile(b) => b.delete_token_until(deadline),
+        }
+    }
+}
+
+/// What one AGY run needs to use a profile's credential without seeing another account's.
+#[derive(Debug, Clone)]
+pub struct ProfileIsolation {
+    /// `HOME` the AGY process must be started with; `None` where no private HOME is needed.
+    pub home: Option<PathBuf>,
+    pub store: ProfileStore,
+}
+
+/// Prepares the profile's private credential store for this platform. Must be called while
+/// holding the profile lock.
+///
+/// macOS: an isolated HOME with its own login Keychain. Elsewhere: AGY's token file inside the
+/// profile directory, with AGY pinned to file-based storage by [`apply_profile_home`].
+pub fn prepare_profile_isolation(
+    profile_dir: &Path,
+    deadline: Instant,
+) -> Result<ProfileIsolation, String> {
+    if cfg!(target_os = "macos") {
+        let isolated = prepare_isolated_home(profile_dir, deadline)?;
+        return Ok(ProfileIsolation {
+            store: ProfileStore::Keychain(isolated.backend()),
+            home: Some(isolated.home),
+        });
+    }
+    link_shared_skills(profile_dir, &real_user_home()?)?;
+    Ok(ProfileIsolation {
+        home: None,
+        store: ProfileStore::TokenFile(TokenFileBackend::for_profile(profile_dir)),
+    })
+}
+
 /// The Keychain a single AGY run uses: either the caller's backend as-is, or the profile's
-/// isolated Keychain when the backend opts into per-profile isolation.
+/// own store when the backend opts into per-profile isolation.
 #[derive(Debug, Clone)]
 pub enum ProfileKeychain<B> {
     Shared(B),
-    Isolated(IsolatedKeychainBackend),
+    Isolated(ProfileStore),
 }
 
 impl<B: KeychainBackend> KeychainBackend for ProfileKeychain<B> {
@@ -816,11 +977,10 @@ pub fn activate_profile<B: KeychainBackend>(
         guard._process_lock = Some(lock);
         return Ok((guard, None));
     }
-    let isolated = prepare_isolated_home(profile_dir, deadline)
+    let isolation = prepare_profile_isolation(profile_dir, deadline)
         .map_err(|e| format!("Failed to prepare isolated profile Keychain: {e}"))?;
-    let home = isolated.home.clone();
-    let guard = activate_isolated_profile(profile_dir, &isolated, deadline, lock)?;
-    Ok((guard, Some(home)))
+    let guard = activate_profile_store(profile_dir, isolation.store, deadline, lock)?;
+    Ok((guard, isolation.home))
 }
 
 /// Seeds the isolated Keychain from `keychain_token.json` only when it holds no token: once
@@ -831,13 +991,27 @@ pub fn activate_isolated_profile<B: KeychainBackend>(
     deadline: Instant,
     lock: crate::security::ProcessLock,
 ) -> Result<KeychainGuard<ProfileKeychain<B>>, String> {
+    activate_profile_store(
+        profile_dir,
+        ProfileStore::Keychain(isolated.backend()),
+        deadline,
+        lock,
+    )
+}
+
+/// Same as [`activate_isolated_profile`] for any per-profile store.
+pub fn activate_profile_store<B: KeychainBackend>(
+    profile_dir: &Path,
+    backend: ProfileStore,
+    deadline: Instant,
+    lock: crate::security::ProcessLock,
+) -> Result<KeychainGuard<ProfileKeychain<B>>, String> {
     let profile_token = load_token_from_profile(profile_dir).ok_or_else(|| {
         format!(
             "No saved Keychain token in profile directory {}",
             profile_dir.display()
         )
     })?;
-    let backend = isolated.backend();
     let current = backend
         .read_token_until(deadline)
         .map_err(|e| format!("Failed to read profile Keychain: {e}"))?;
@@ -868,18 +1042,57 @@ pub fn activate_isolated_profile<B: KeychainBackend>(
 /// Drops any token in the profile's isolated Keychain so the next run re-seeds it from
 /// `keychain_token.json`. Call after replacing that file outside an AGY run (e.g. an import).
 pub fn invalidate_isolated_token(profile_dir: &Path, deadline: Instant) -> Result<(), String> {
-    if !isolated_home_dir(profile_dir)?.exists() {
+    if cfg!(target_os = "macos") && !isolated_home_dir(profile_dir)?.exists() {
         return Ok(());
     }
-    prepare_isolated_home(profile_dir, deadline)?
-        .backend()
+    prepare_profile_isolation(profile_dir, deadline)?
+        .store
         .delete_token_until(deadline)
 }
 
 /// Points an AGY command at the profile's isolated HOME, if any.
+///
+/// Off macOS it also pins AGY to its per-profile token file: AGY would otherwise prefer the
+/// desktop keyring (Secret Service) when one is reachable, and that keyring is shared by every
+/// profile. AGY skips the keyring for SSH sessions, so make every run look like one.
 pub fn apply_profile_home(cmd: &mut Command, home: Option<&Path>) {
     if let Some(home) = home {
         cmd.env("HOME", home);
+    }
+    if !cfg!(target_os = "macos")
+        && std::env::var_os("SSH_CONNECTION").is_none_or(|v| v.is_empty())
+        && std::env::var_os("SSH_TTY").is_none_or(|v| v.is_empty())
+    {
+        cmd.env("SSH_TTY", "/dev/null");
+    }
+}
+
+/// The credential plain `agy` (no profile) is currently logged in with, for `--import-current`.
+pub fn read_current_agy_token() -> Result<Option<String>, String> {
+    if cfg!(target_os = "macos") {
+        return read_system_keychain_token();
+    }
+    if let Some(home) = dirs::home_dir() {
+        let file = TokenFileBackend::for_profile(&home.join(".gemini"));
+        if let Some(token) = file.read_token()? {
+            return Ok(Some(token));
+        }
+    }
+    // A desktop session keeps the login in the Secret Service keyring instead of the file.
+    let mut lookup = Command::new("secret-tool");
+    lookup.args([
+        "lookup",
+        "service",
+        KEYCHAIN_SERVICE,
+        "username",
+        KEYCHAIN_ACCOUNT,
+    ]);
+    match run_tool_with_timeout(&mut lookup, "secret-tool", KEYCHAIN_COMMAND_TIMEOUT) {
+        Ok(output) if output.status.success() => {
+            let token = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            Ok((!token.is_empty()).then_some(token))
+        }
+        _ => Ok(None),
     }
 }
 

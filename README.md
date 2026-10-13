@@ -1,8 +1,8 @@
 # agyp & codexp — multi-account CLIs for Antigravity and Codex
 
-Run [Google Antigravity](https://antigravity.google/) (`agy`) and [OpenAI Codex CLI](https://github.com/openai/codex) (`codex`) under several accounts on one Mac, with each account's credentials fully isolated.
+Run [Google Antigravity](https://antigravity.google/) (`agy`) and [OpenAI Codex CLI](https://github.com/openai/codex) (`codex`) under several accounts on one machine (macOS or Linux), with each account's credentials fully isolated.
 
-- **`agyp`** manages multiple `agy` accounts. Every profile gets its own HOME and its own macOS Keychain, so logins never collide and profiles can run in parallel.
+- **`agyp`** manages multiple `agy` accounts. Every profile gets its own credential store (a private HOME and Keychain on macOS, a private token file on Linux), so logins never collide and profiles can run in parallel.
 - **`codexp`** runs `codex` under multiple imported ChatGPT accounts, one `CODEX_HOME` per profile.
 
 Both are built for **developers and AI agents** (Claude Code, Codex, Hermes, Orca, …) that need to delegate prompts or coding tasks to a specific account non-interactively and parse the result.
@@ -14,8 +14,9 @@ Both are built for **developers and AI agents** (Claude Code, Codex, Hermes, Orc
 ## Highlights
 
 - **Real Keychain isolation (macOS).** `agy` reads its token from one fixed Keychain item, so normally only one account can be logged in at a time. `agyp` gives every profile a private HOME and Keychain under `~/.gemini-profiles/homes/<name>/`. The system Keychain is never touched.
+- **Linux / Ubuntu Server support.** On Linux each profile keeps its token in its own `agy` token file, and `agyp` pins `agy` to that file so a desktop keyring is never shared between profiles. No keyring, D-Bus or extra packages are needed, so it works on headless servers, over SSH and from cron or systemd.
 - **Parallel profiles.** Locks are per profile and held only for a few seconds, so different profiles (and even several runs of the same profile) can work at the same time.
-- **Browser OAuth per profile.** `agyp login <name>` runs the OAuth flow inside the profile's own HOME, so Google shows the account picker instead of reusing your current login.
+- **Browser OAuth per profile.** `agyp login <name>` runs the OAuth flow against the profile's own credential store, so Google shows the account picker instead of reusing your current login.
 - **Agent-friendly output.**
   - Clean stdout with no wrapper noise.
   - `--json` on the commands agents care about.
@@ -28,9 +29,18 @@ Both are built for **developers and AI agents** (Claude Code, Codex, Hermes, Orc
 
 ---
 
+## Platform support
+
+| Platform | `agyp` | `codexp` | How `agyp` isolates accounts |
+| :--- | :--- | :--- | :--- |
+| macOS | ✅ | ✅ | Private HOME + private Keychain per profile |
+| Linux (Ubuntu Server, headless / SSH) | ✅ | ✅ | Private `agy` token file per profile, no keyring needed |
+
+Windows is not supported.
+
 ## Requirements
 
-- macOS (Keychain isolation relies on `/usr/bin/security`)
+- macOS (Keychain isolation relies on `/usr/bin/security`) or Linux (developed against Ubuntu Server 24.04 and `agy` 1.3.4)
 - [Rust](https://rustup.rs/) toolchain (to build)
 - `agy` on your `PATH` for `agyp`
 - `codex` on your `PATH` for `codexp`
@@ -63,7 +73,7 @@ Import the account `agy` is already logged in with:
 agyp login default --import-current
 ```
 
-Add more accounts. Each command opens the Google OAuth page in your browser; pick the account you want for that profile:
+Add more accounts. Each command opens the Google OAuth page in your browser; pick the account you want for that profile. On a server without a browser, `agy` prints the login URL instead: open it on any machine and paste the authorization code back into the terminal.
 
 ```bash
 agyp login profile-1
@@ -138,7 +148,16 @@ Use `agyp task` for coding work. `agyp prompt` has no worktree isolation, deadli
 - The private Keychain is the source of truth for the profile's token. The first run seeds it from `~/.gemini-profiles/profiles/<name>/keychain_token.json`; `agy` refreshes the token inside the private Keychain, and `agyp` backs it up to `keychain_token.json` after every run.
 - Per-profile locks (`~/.gemini-profiles/locks/<name>.lock`) are held only while the Keychain is prepared. If a profile is busy you will see `... is in use by another agyp command; waiting...`.
 
-**Caveat:** tools inside a task that store credentials in the macOS Keychain (for example `gh`, or git over HTTPS with `osxkeychain`) will not see the credentials from your real login Keychain. Use SSH for git and `GH_TOKEN` for `gh`.
+### Linux
+
+- Off macOS `agy` stores its login either in the desktop keyring (Secret Service over D-Bus) or, when it detects an SSH session, a container or no keyring, in a token file inside its data directory. The keyring is one shared item for the whole user session, but the file lives under `--gemini_dir`, which `agyp` already sets per profile: `~/.gemini-profiles/profiles/<name>/antigravity-cli/antigravity-oauth-token`.
+- `agyp` therefore always makes `agy` use the file: if neither `SSH_CONNECTION` nor `SSH_TTY` is set, it starts `agy` with `SSH_TTY=/dev/null`, which is what `agy` checks before deciding to skip the keyring. HOME is left alone, so there is no `homes/` directory and tools inside a task (git, `gh`, npm, ...) see your normal configuration and credentials.
+- The token file is the source of truth for the profile. The first run seeds it from `keychain_token.json`, `agy` refreshes it in place, and `agyp` backs it up to `keychain_token.json` after every run, exactly as on macOS.
+- `agyp login <name> --import-current` imports the login of plain `agy` from `~/.gemini/antigravity-cli/antigravity-oauth-token`, or from the desktop keyring when `secret-tool` is installed.
+- A token saved from the macOS Keychain (go-keyring's base64 envelope) is unwrapped to plain JSON before it is written to the token file.
+- `agyp default <name>` only changes the default profile on Linux; it does not replace the login of plain `agy`.
+
+**Caveat (macOS):** tools inside a task that store credentials in the macOS Keychain (for example `gh`, or git over HTTPS with `osxkeychain`) will not see the credentials from your real login Keychain. Use SSH for git and `GH_TOKEN` for `gh`.
 
 ---
 

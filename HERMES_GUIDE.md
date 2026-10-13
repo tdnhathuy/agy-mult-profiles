@@ -2,7 +2,7 @@
 
 > **Safety policy:** select one explicit profile for each task. Do not round-robin or automatically switch profiles after `429`/quota errors. AGY coding must run in an isolated worktree; Hermes owns review, tests, commits, merges, and pushes.
 
-Tài liệu này được tối ưu để bạn copy trực tiếp vào System Prompt / Instructions của Hermes trên máy Mac Mini, hoặc lưu thành file hướng dẫn cho Hermes tự đọc.
+Tài liệu này được tối ưu để bạn copy trực tiếp vào System Prompt / Instructions của Hermes (chạy được trên cả macOS và Linux), hoặc lưu thành file hướng dẫn cho Hermes tự đọc.
 
 ---
 

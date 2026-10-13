@@ -37,17 +37,21 @@ pub fn cmd_login(name: &str, import_current: bool) -> Result<(), i32> {
     })?;
 
     if import_current {
-        let creds_file = dirs::home_dir().map(|h| h.join(".gemini/oauth_creds.json"));
-        let creds_exist = creds_file.as_ref().map(|p| p.is_file()).unwrap_or(false);
+        let creds_exist = dirs::home_dir().is_some_and(|h| {
+            let gemini = h.join(".gemini");
+            gemini.join("oauth_creds.json").is_file()
+                || gemini.join(crate::keychain::AGY_TOKEN_FILE).is_file()
+        });
 
         if !creds_exist {
             eprintln!("Warning: No active credentials found in ~/.gemini/oauth_creds.json. Please run 'agyp login <profile>' without --import-current to authenticate.");
         }
 
-        // 1. Try importing token from system Keychain
-        if let Ok(Some(token)) = crate::keychain::read_system_keychain_token() {
+        // 1. Try importing the token plain `agy` is logged in with (system Keychain on macOS,
+        //    AGY's token file or desktop keyring elsewhere)
+        if let Ok(Some(token)) = crate::keychain::read_current_agy_token() {
             let _ = crate::keychain::save_token_to_profile(&profile_dir, &token);
-            // The isolated Keychain wins over keychain_token.json once populated; drop any
+            // The profile's own store wins over keychain_token.json once populated; drop any
             // token from a previous account so the next run re-seeds from the imported one.
             crate::keychain::invalidate_isolated_token(
                 &profile_dir,
@@ -87,13 +91,13 @@ pub fn cmd_login(name: &str, import_current: bool) -> Result<(), i32> {
             }
         }
     } else {
-        // Fresh interactive login runs AGY inside the profile's isolated HOME, so OAuth writes
-        // straight into the profile Keychain and the shared system Keychain is never touched.
+        // Fresh interactive login runs AGY against the profile's own credential store, so OAuth
+        // writes straight into it and the shared system Keychain is never touched.
         let agy_bin = locate_agy_binary().map_err(|e| {
             eprintln!("Error: {}", e);
             127
         })?;
-        let isolated = crate::keychain::prepare_isolated_home(
+        let isolated = crate::keychain::prepare_profile_isolation(
             &profile_dir,
             Instant::now() + crate::keychain::PROFILE_KEYCHAIN_SETUP_TIMEOUT,
         )
@@ -101,7 +105,7 @@ pub fn cmd_login(name: &str, import_current: bool) -> Result<(), i32> {
             eprintln!("Failed to prepare isolated profile Keychain: {e}");
             1
         })?;
-        let profile_keychain = isolated.backend();
+        let profile_keychain = isolated.store;
         // Remove any leftover token so AGY cannot silently reuse a previous account.
         profile_keychain.delete_token().map_err(|e| {
             eprintln!("Failed to clear profile Keychain before login: {e}");
@@ -113,7 +117,7 @@ pub fn cmd_login(name: &str, import_current: bool) -> Result<(), i32> {
 
         let mut login_cmd = std::process::Command::new(agy_bin);
         login_cmd.arg(format!("--gemini_dir={}", profile_dir.display()));
-        crate::keychain::apply_profile_home(&mut login_cmd, Some(&isolated.home));
+        crate::keychain::apply_profile_home(&mut login_cmd, isolated.home.as_deref());
         let login = run_login_session(
             &mut login_cmd,
             &profile_keychain,
@@ -201,7 +205,7 @@ struct LoginSession {
 /// commands can use it while this AGY session stays open.
 fn run_login_session(
     cmd: &mut std::process::Command,
-    profile_keychain: &crate::keychain::IsolatedKeychainBackend,
+    profile_keychain: &crate::keychain::ProfileStore,
     config_path: &std::path::Path,
     name: &str,
     profile_dir: &std::path::Path,
