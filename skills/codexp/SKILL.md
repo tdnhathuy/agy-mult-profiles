@@ -26,8 +26,8 @@ own `CODEX_HOME`, so profiles run fully in parallel, including several tasks on 
 4. Read the result from the JSON: `status`, `failure_kind`, `final_message`, `thread_id`, `usage`.
    To follow up in the same conversation:
    `codexp task --profile <same p> --worktree <same path> --resume <thread_id> --prompt-file <file> --json`
-   History is shared across profiles, so `--resume <thread_id>` also works under another profile
-   when the user asks for that.
+   History is shared across profiles and with plain `codex` (all in `~/.codex`), so
+   `--resume <thread_id>` also works under another profile when the user asks for that.
 5. Exit codes: `0` success, `1` failure (see `failure_kind`), `2` unauthenticated, `127` codex missing.
 6. `failure_kind = "unauthenticated"` (exit 2): the imported token expired. codexp never logs in or
    refreshes tokens. Tell the user to export a fresh auth file from OmniRoute and run
