@@ -63,6 +63,7 @@ pub fn build_codex_command(home: &Path, args: &[String]) -> Result<Command, Stri
     let mut cmd = Command::new(locate_codex_binary()?);
     cmd.args(args)
         .env("CODEX_HOME", home)
+        .env("CODEX_SQLITE_HOME", super::home::sqlite_home_for(home)?)
         .env("CODEX_REFRESH_TOKEN_URL_OVERRIDE", DISABLED_OAUTH_URL)
         .env("CODEX_REVOKE_TOKEN_URL_OVERRIDE", DISABLED_OAUTH_URL);
     for key in STRIPPED_ENV {

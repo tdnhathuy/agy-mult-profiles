@@ -8,6 +8,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::auth::{inspect_auth, load_profile_auth, sanitize_for_import, AccountSummary};
+use super::claude::McpOverrides;
 use super::exec::{build_codex_command, classify_exec, enforced_config_args, parse_exec_events};
 use super::home::{home_dir, homes_root, prepare_home, registry_path, write_auth};
 use crate::commands::task::{
@@ -478,6 +479,8 @@ pub fn run_task(args: &TaskArgs) -> CodexTaskOutput {
         codex_args.push("resume".to_string());
     }
     codex_args.extend(enforced_config_args());
+    let mcp = claude_mcp(&worktree);
+    codex_args.extend(mcp.args.iter().cloned());
     codex_args.extend([
         "-c".to_string(),
         format!("sandbox_mode=\"{}\"", args.sandbox),
@@ -506,7 +509,7 @@ pub fn run_task(args: &TaskArgs) -> CodexTaskOutput {
             return o;
         }
     };
-    cmd.current_dir(&worktree);
+    cmd.current_dir(&worktree).envs(mcp.env.iter().cloned());
 
     let _ = ProfileRegistry::update(&registry_path(), |reg| {
         if let Some(p) = reg.profiles.get_mut(&profile.name) {
@@ -594,6 +597,90 @@ pub fn cmd_task(args: &TaskArgs, json_output: bool) -> Result<(), i32> {
     }
 }
 
+/// Claude's MCP servers for a run in `cwd`; servers Codex cannot run are reported and skipped.
+fn claude_mcp(cwd: &Path) -> McpOverrides {
+    let mcp = super::claude::mcp_overrides(cwd);
+    for w in &mcp.warnings {
+        eprintln!("Warning: {w}");
+    }
+    mcp
+}
+
+const BYPASS_FLAG: &str = "--dangerously-bypass-approvals-and-sandbox";
+/// Subcommands that take `BYPASS_FLAG` right after their name.
+const BYPASS_SUBCOMMANDS: &[&str] = &["exec", "e", "resume", "fork"];
+/// Every other Codex subcommand: none of them runs an agent, so none takes `BYPASS_FLAG`.
+const OTHER_SUBCOMMANDS: &[&str] = &[
+    "agents",
+    "review",
+    "login",
+    "logout",
+    "mcp",
+    "mcp-server",
+    "plugin",
+    "app-server",
+    "remote-control",
+    "app",
+    "completion",
+    "update",
+    "doctor",
+    "sandbox",
+    "debug",
+    "apply",
+    "a",
+    "queue",
+    "archive",
+    "delete",
+    "migrate-rollouts",
+    "unarchive",
+    "cloud",
+    "exec-server",
+    "features",
+    "help",
+];
+/// Flags that already pick an approval or sandbox policy, which `BYPASS_FLAG` would conflict with.
+const POLICY_FLAGS: &[&str] = &[
+    BYPASS_FLAG,
+    "-a",
+    "--ask-for-approval",
+    "-s",
+    "--sandbox",
+    "--full-auto",
+];
+
+/// The raw codex command line of `codexp exec`. `config` (`-c` overrides) goes where the command
+/// reads it: agent subcommands (`exec`, `resume`, `fork`) ignore root overrides such as
+/// `mcp_servers`, so they get them after their own name; everything else gets them at the root.
+/// Agents run fully approved (`BYPASS_FLAG`) unless the caller chose an approval or sandbox policy.
+pub fn exec_args(args: &[String], config: &[String]) -> Vec<String> {
+    let chosen = args.iter().any(|a| {
+        POLICY_FLAGS
+            .iter()
+            .any(|f| a == f || (f.starts_with("--") && a.starts_with(&format!("{f}="))))
+    });
+    let bypass = (!chosen).then(|| BYPASS_FLAG.to_string());
+    let mut out = Vec::new();
+    match args.first().map(String::as_str) {
+        Some(sub) if BYPASS_SUBCOMMANDS.contains(&sub) => {
+            out.push(args[0].clone());
+            out.extend(config.iter().cloned());
+            out.extend(bypass);
+            out.extend(args[1..].iter().cloned());
+        }
+        Some(sub) if OTHER_SUBCOMMANDS.contains(&sub) => {
+            out.extend(config.iter().cloned());
+            out.extend(args.iter().cloned());
+        }
+        // No subcommand: the interactive TUI, optionally with root flags or a prompt.
+        _ => {
+            out.extend(config.iter().cloned());
+            out.extend(bypass);
+            out.extend(args.iter().cloned());
+        }
+    }
+    out
+}
+
 /// Runs the Codex CLI under a profile with inherited stdio (interactive TUI or any subcommand).
 pub fn cmd_exec(profile_name: &str, args: &[String]) -> Result<(), i32> {
     let reg = load_registry()?;
@@ -615,9 +702,13 @@ pub fn cmd_exec(profile_name: &str, args: &[String]) -> Result<(), i32> {
     }
     prepare_home(&profile.dir).map_err(|e| fail(e, 1))?;
 
-    let mut codex_args = enforced_config_args();
-    codex_args.extend(args.iter().cloned());
+    let cwd = std::env::current_dir().map_err(|e| fail(format!("cannot read cwd: {e}"), 1))?;
+    let mcp = claude_mcp(&cwd);
+    let mut config = enforced_config_args();
+    config.extend(mcp.args.iter().cloned());
+    let codex_args = exec_args(args, &config);
     let mut cmd = build_codex_command(&profile.dir, &codex_args).map_err(|e| fail(e, 127))?;
+    cmd.envs(mcp.env.iter().cloned());
     // Ctrl-C belongs to Codex (same process group); codexp only waits for it to exit.
     let _signals = crate::security::SignalGuard::install().map_err(|e| fail(e, 1))?;
     let status = cmd
