@@ -264,3 +264,26 @@ pub fn plain_codex_sessions(ps: &str, me: u32) -> Vec<u32> {
     pids.sort();
     pids
 }
+
+/// `codexp exec`/`task` runs in a `ps -axo pid=,ppid=,command=` listing that use one of
+/// `names` (a profile and its aliases).
+pub fn codexp_runs_for(ps: &str, names: &[&str]) -> Vec<u32> {
+    ps.lines()
+        .filter_map(|line| {
+            let (pid, rest) = split_field(line);
+            let (_, command) = split_field(rest);
+            let args: Vec<&str> = command.split_whitespace().collect();
+            let is_codexp = args
+                .first()
+                .and_then(|exe| Path::new(exe).file_name())
+                .is_some_and(|n| n == "codexp");
+            let uses = |arg: &str| names.contains(&arg);
+            let hit = is_codexp
+                && args.windows(2).any(|w| {
+                    (matches!(w[0], "exec" | "--profile") && uses(w[1]))
+                        || w[1].strip_prefix("--profile=").is_some_and(uses)
+                });
+            hit.then(|| pid.parse().ok()).flatten()
+        })
+        .collect()
+}

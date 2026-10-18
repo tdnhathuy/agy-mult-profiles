@@ -184,6 +184,7 @@ codexp task --profile c1 --worktree ../wt-a --prompt-file prompt.md --timeout 30
 | `codexp sync <folder>` | Re-import every `*.json` export in a folder. An account that already has a profile is imported into it (matched by account id, then email); a new account becomes the next `profile-<n>` and is asked for an alias. The freshest export of an account wins; if plain `codex` uses a synced account its login is refreshed too |
 | `codexp list` | List profiles and token validity |
 | `codexp rm <name>` | Remove a profile and its `CODEX_HOME` |
+| `codexp rename <old> <new>` | Rename a profile: its `CODEX_HOME` moves, aliases follow, and threads it started keep resuming. Refused while a `codexp exec`/`task` run uses it |
 | `codexp alias ...` | Manage aliases |
 | `codexp task --profile <p> --worktree <path>` | Run `codex exec` in a Git linked worktree. Options: `--prompt-file`, `--timeout`, `--model`, `--reasoning-effort`, `--sandbox` (default `workspace-write`), `--resume <thread_id>`, `--json` |
 | `codexp q [profile] [--json]` | Read-only ChatGPT usage query (same source as Codex `/status`) |

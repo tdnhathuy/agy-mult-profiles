@@ -50,6 +50,13 @@ enum Commands {
         #[arg(short = 'y', long)]
         yes: bool,
     },
+    /// Rename a profile (its aliases follow)
+    Rename {
+        /// Current profile name
+        old: String,
+        /// New profile name
+        new: String,
+    },
     /// Manage profile aliases
     Alias {
         #[command(subcommand)]
@@ -134,6 +141,7 @@ fn main() {
         }) => commands::cmd_import(name, from, *force, *remove_source),
         Some(Commands::Sync { dir }) => commands::cmd_sync(dir),
         Some(Commands::List { json }) => commands::cmd_list(*json),
+        Some(Commands::Rename { old, new }) => commands::cmd_rename(old, new),
         Some(Commands::Rm { name, yes }) => commands::cmd_rm(name, *yes),
         Some(Commands::Alias { command }) => match command {
             Some(AliasCommands::Set { alias, profile }) => commands::cmd_alias_set(alias, profile),

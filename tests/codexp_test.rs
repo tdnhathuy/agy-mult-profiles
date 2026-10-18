@@ -255,3 +255,20 @@ fn plain_codex_sessions_skips_codexp_runs_apps_and_own_ancestors() {
         vec![200, 201]
     );
 }
+
+#[test]
+fn codexp_runs_for_matches_exec_and_task_by_profile_or_alias() {
+    let ps = "\
+    10     1 codexp exec rn-old
+    11    10 /Users/u/.local/bin/codex -c x=1
+    12     1 /Users/u/.local/bin/codexp task --profile rn-alias --worktree ../wt
+    13     1 codexp task --profile=rn-old --worktree ../wt
+    14     1 codexp exec rn-other
+    15     1 codexp q rn-old
+    16     1 /bin/zsh -lc codexp exec rn-old
+";
+    assert_eq!(
+        agyp::codex::exec::codexp_runs_for(ps, &["rn-old", "rn-alias"]),
+        vec![10, 12, 13]
+    );
+}

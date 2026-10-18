@@ -431,6 +431,84 @@ pub fn cmd_rm(name: &str, yes: bool) -> Result<(), i32> {
     Ok(())
 }
 
+/// Renames a profile: its CODEX_HOME, registry entry and aliases move to `new`, and threads it
+/// started keep resolving. Refused while a codexp run uses the profile, since its CODEX_HOME
+/// would vanish under it.
+pub fn cmd_rename(old: &str, new: &str) -> Result<(), i32> {
+    crate::security::validate_component(new, "profile name").map_err(|e| fail(e, 1))?;
+    let reg = load_registry()?;
+    let profile = reg
+        .profiles
+        .get(old)
+        .cloned()
+        .ok_or_else(|| fail(format!("profile '{old}' not found"), 1))?;
+    let mut names: Vec<&str> = vec![old];
+    names.extend(
+        reg.aliases
+            .iter()
+            .filter(|(_, target)| *target == old)
+            .map(|(alias, _)| alias.as_str()),
+    );
+    if let Ok(out) = std::process::Command::new("ps")
+        .args(["-axo", "pid=,ppid=,command="])
+        .output()
+    {
+        let running = super::exec::codexp_runs_for(&String::from_utf8_lossy(&out.stdout), &names);
+        if !running.is_empty() {
+            let pids: Vec<String> = running.iter().map(u32::to_string).collect();
+            return Err(fail(
+                format!(
+                    "profile '{old}' is in use by codexp (pid {}); finish those runs first",
+                    pids.join(", ")
+                ),
+                1,
+            ));
+        }
+    }
+
+    let old_home = crate::security::validate_profile_dir_under(&profile.dir, &homes_root())
+        .map_err(|e| fail(e, 1))?;
+    let new_home = home_dir(new);
+    ProfileRegistry::update(&registry_path(), |reg| {
+        if reg.profiles.contains_key(new) || reg.aliases.contains_key(new) {
+            return Err(format!("'{new}' is already a profile or alias"));
+        }
+        let mut info = reg
+            .profiles
+            .remove(old)
+            .ok_or_else(|| format!("profile '{old}' not found"))?;
+        if fs::symlink_metadata(&new_home).is_ok() {
+            return Err(format!("{} already exists", new_home.display()));
+        }
+        fs::rename(&old_home, &new_home).map_err(|e| {
+            format!(
+                "cannot move {} to {}: {e}",
+                old_home.display(),
+                new_home.display()
+            )
+        })?;
+        info.name = new.to_string();
+        info.dir = new_home.clone();
+        reg.profiles.insert(new.to_string(), info);
+        for target in reg.aliases.values_mut() {
+            if target == old {
+                *target = new.to_string();
+            }
+        }
+        if reg.default_profile.as_deref() == Some(old) {
+            reg.default_profile = Some(new.to_string());
+        }
+        Ok(())
+    })
+    .map_err(|e| fail(e, 1))?;
+    // Threads the profile started record rollout paths under the home path codexp gave Codex.
+    if let Err(e) = repoint_thread_rollouts(&profile.dir) {
+        eprintln!("Warning: threads started by '{old}' may not resume: {e}");
+    }
+    println!("Renamed profile '{old}' to '{new}'.");
+    Ok(())
+}
+
 pub fn cmd_alias_set(alias: &str, profile: &str) -> Result<(), i32> {
     crate::security::validate_component(alias, "alias").map_err(|e| fail(e, 1))?;
     ProfileRegistry::update(&registry_path(), |reg| {

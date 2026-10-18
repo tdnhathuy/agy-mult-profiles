@@ -625,3 +625,60 @@ fn sync_reimports_known_accounts_and_adds_new_ones() {
     assert_eq!(token(&env.codex().join("auth.json")), fresh_token);
     assert!(env.profiles().join("homes/profile-1/auth.json").is_file());
 }
+
+#[test]
+fn rename_moves_home_aliases_and_thread_paths() {
+    let env = Env::new();
+    let a = write_export(env.tmp.path(), "a@x.com", "acct-a", 86_400 * 3);
+    let b = write_export(env.tmp.path(), "b@x.com", "acct-b", 86_400 * 3);
+    for (name, file) in [("rn-a", &a), ("rn-b", &b)] {
+        assert!(env
+            .run(&["import", name, "--from", file.to_str().unwrap()])
+            .status
+            .success());
+    }
+    assert!(env.run(&["alias", "set", "rn-w", "rn-a"]).status.success());
+    let old_home = env.profiles().join("homes/rn-a");
+    let index = env.codex().join("state_5.sqlite");
+    let rollout = old_home.join("sessions/2026/10/18/rollout-x-t-r.jsonl");
+    thread_index(&index, &[("t-r", rollout.to_str().unwrap(), None)]);
+
+    // Taken names are refused and leave everything in place.
+    for taken in ["rn-b", "rn-w"] {
+        assert!(!env.run(&["rename", "rn-a", taken]).status.success());
+    }
+    assert!(!env.run(&["rename", "rn-missing", "rn-z"]).status.success());
+    assert!(old_home.is_dir());
+
+    let out = env.run(&["rename", "rn-a", "rn-main"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let new_home = env.profiles().join("homes/rn-main");
+    assert!(!old_home.exists());
+    assert!(new_home.join("auth.json").is_file());
+    assert_eq!(
+        fs::read_link(new_home.join("sessions")).unwrap(),
+        env.codex().join("sessions")
+    );
+    let registry: Value =
+        serde_json::from_str(&fs::read_to_string(env.profiles().join("profiles.json")).unwrap())
+            .unwrap();
+    assert_eq!(registry["aliases"]["rn-w"], "rn-main");
+    assert_eq!(registry["profiles"]["rn-main"]["name"], "rn-main");
+    assert!(registry["profiles"].get("rn-a").is_none());
+    assert_eq!(
+        sql(&index, "SELECT rollout_path FROM threads WHERE id = 't-r';"),
+        env.codex()
+            .join("sessions/2026/10/18/rollout-x-t-r.jsonl")
+            .display()
+            .to_string()
+    );
+    // The renamed profile still runs, by name or alias.
+    assert!(env
+        .run(&["exec", "rn-w", "--", "login", "status"])
+        .status
+        .success());
+}
