@@ -30,6 +30,11 @@ enum Commands {
         #[arg(long)]
         remove_source: bool,
     },
+    /// Re-import every *.json export in a folder (new accounts become new profiles)
+    Sync {
+        /// Folder of exported auth.json files (e.g. from OmniRoute)
+        dir: PathBuf,
+    },
     /// List profiles and token validity
     #[command(alias = "ls")]
     List {
@@ -127,6 +132,7 @@ fn main() {
             force,
             remove_source,
         }) => commands::cmd_import(name, from, *force, *remove_source),
+        Some(Commands::Sync { dir }) => commands::cmd_sync(dir),
         Some(Commands::List { json }) => commands::cmd_list(*json),
         Some(Commands::Rm { name, yes }) => commands::cmd_rm(name, *yes),
         Some(Commands::Alias { command }) => match command {

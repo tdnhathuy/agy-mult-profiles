@@ -170,6 +170,7 @@ Use `agyp task` for coding work. `agyp prompt` has no worktree isolation, deadli
 
 ```bash
 codexp import c1 --from ~/Downloads/auth-a.json --remove-source
+codexp sync ~/omniroute-exports  # re-import every *.json in a folder; new accounts become profile-<n>
 codexp list
 codexp q                     # Codex quota for every profile (5-hour and weekly windows)
 codexp exec c1               # open the Codex TUI as c1
@@ -180,18 +181,19 @@ codexp task --profile c1 --worktree ../wt-a --prompt-file prompt.md --timeout 30
 | Command | Description |
 | :--- | :--- |
 | `codexp import <name> --from <file>` | Import or refresh a profile from an exported `auth.json`. `--force`, `--remove-source` |
+| `codexp sync <folder>` | Re-import every `*.json` export in a folder. An account that already has a profile is imported into it (matched by account id, then email); a new account becomes the next `profile-<n>` and is asked for an alias. The freshest export of an account wins; if plain `codex` uses a synced account its login is refreshed too |
 | `codexp list` | List profiles and token validity |
 | `codexp rm <name>` | Remove a profile and its `CODEX_HOME` |
 | `codexp alias ...` | Manage aliases |
 | `codexp task --profile <p> --worktree <path>` | Run `codex exec` in a Git linked worktree. Options: `--prompt-file`, `--timeout`, `--model`, `--reasoning-effort`, `--sandbox` (default `workspace-write`), `--resume <thread_id>`, `--json` |
 | `codexp q [profile] [--json]` | Read-only ChatGPT usage query (same source as Codex `/status`) |
-| `codexp active [profile]` | Copy a profile's credentials into `~/.codex/auth.json` so plain `codex` uses it; without a profile, show which one it uses. A login `codexp` did not write is backed up once to `~/.codex/auth.json.pre-codexp`. A running Codex app-server daemon is restarted so it drops the cached login (this interrupts its open sessions; they can be resumed). Refresh stays disabled, so re-run after re-importing, and do not run `codex login`/`logout` there |
+| `codexp active [profile]` | Copy a profile's credentials into `~/.codex/auth.json` so plain `codex` uses it; without a profile, show which one it uses. A login `codexp` did not write is backed up once to `~/.codex/auth.json.pre-codexp`. Running plain `codex` CLI sessions (not ones `codexp` launched, not the Codex app or editor extensions) are stopped and a running Codex app-server daemon is restarted, because both keep the login they started with; continue them with `codex resume`. Refresh stays disabled, so re-run after re-importing, and do not run `codex login`/`logout` there |
 | `codexp exec <profile> [-- <args...>]` | Run any `codex` command under a profile. The TUI, `exec`, `resume` and `fork` get `--dangerously-bypass-approvals-and-sandbox` unless you pass `-a`/`-s`/`--full-auto` yourself |
 
 How it protects the upstream session:
 
 - On import the refresh token is replaced with a dummy value and Codex's refresh/revoke endpoints are pointed at a dead address, so `codexp` can never rotate or revoke the token the upstream owner is still using.
-- The trade-off: when the access token expires (roughly 7–10 days), the profile reports `unauthenticated` (exit code `2`). Export a fresh file and run `codexp import <name> --from <file>` again.
+- The trade-off: when the access token expires (roughly 7–10 days), the profile reports `unauthenticated` (exit code `2`). Export a fresh file and run `codexp import <name> --from <file>` again, or export every account into one folder and run `codexp sync <folder>`.
 - Import rejects files whose `id_token` / `access_token` / `account_id` belong to different accounts, expired files, switching the account inside an existing profile, and importing the same account twice (unless `--force`).
 - Shared Codex config lives at `~/.codex-profiles/config.toml`. `codexp` always forces `model_provider="openai"`, `cli_auth_credentials_store="file"` and `forced_login_method="chatgpt"`. `AGENTS.md` and `rules` are symlinked from `~/.codex`.
 - Claude Code is the source of skills and MCP servers. On every run each profile's `skills/` gets one link per skill in Claude's `skills/` and in its enabled plugins (skills Codex already reads from `~/.agents/skills` are skipped), and Claude's MCP servers (enabled plugins' `.mcp.json`, user-scope `mcpServers` and local-scope `projects.<cwd>.mcpServers` of `.claude.json`) are passed to Codex as `-c mcp_servers.*` overrides. Secrets (server `env`, HTTP `headers`) travel through the environment, never the command line. `${VAR}` / `${VAR:-default}` are expanded; SSE servers are skipped. Claude's config is read from `$CLAUDE_CONFIG_DIR` when set, otherwise `~/.claude` and `~/.claude.json`. OAuth servers (e.g. Figma) need a one-time `codexp exec <p> -- mcp login <name>`.

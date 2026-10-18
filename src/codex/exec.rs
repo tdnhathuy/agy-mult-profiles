@@ -208,3 +208,59 @@ pub fn classify_exec(
         _ => Err(TaskFailureKind::EmptyOutput),
     }
 }
+
+/// Splits the first whitespace-separated field off `s`.
+fn split_field(s: &str) -> (&str, &str) {
+    let s = s.trim_start();
+    s.split_at(s.find(char::is_whitespace).unwrap_or(s.len()))
+}
+
+/// Plain `codex` CLI sessions in a `ps -axo pid=,ppid=,command=` listing, which keep the login
+/// they started with. Skipped: runs codexp launched (parent `codexp`; they use their profile's
+/// own login), app-server processes (the daemon is restarted instead; the Codex app and editor
+/// extensions own theirs), binaries inside app bundles or editor extensions, and `me` and its
+/// ancestors, so a `codexp active` run from inside a Codex session never stops that session.
+pub fn plain_codex_sessions(ps: &str, me: u32) -> Vec<u32> {
+    let procs: std::collections::HashMap<u32, (u32, &str)> = ps
+        .lines()
+        .filter_map(|line| {
+            let (pid, rest) = split_field(line);
+            let (ppid, rest) = split_field(rest);
+            let command = rest.trim();
+            (!command.is_empty()).then_some(())?;
+            Some((pid.parse().ok()?, (ppid.parse().ok()?, command)))
+        })
+        .collect();
+    let exe_name = |command: &str| {
+        let exe = command.split_whitespace().next().unwrap_or("");
+        Path::new(exe)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default()
+    };
+    let mut ancestors = std::collections::HashSet::new();
+    let mut cur = me;
+    while ancestors.insert(cur) {
+        match procs.get(&cur) {
+            Some((ppid, _)) if *ppid != 0 => cur = *ppid,
+            _ => break,
+        }
+    }
+    let mut pids: Vec<u32> = procs
+        .iter()
+        .filter(|(pid, (ppid, command))| {
+            let exe = command.split_whitespace().next().unwrap_or("");
+            !ancestors.contains(pid)
+                && exe_name(command) == "codex"
+                && !exe.contains(".app/")
+                && !exe.contains("/extensions/")
+                && !command.split_whitespace().any(|arg| arg == "app-server")
+                && procs
+                    .get(ppid)
+                    .is_none_or(|(_, parent)| exe_name(parent) != "codexp")
+        })
+        .map(|(pid, _)| *pid)
+        .collect();
+    pids.sort();
+    pids
+}

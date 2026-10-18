@@ -232,3 +232,26 @@ fn exec_places_overrides_and_bypass_where_codex_reads_them() {
     );
     assert_eq!(exec_args(&[], &config), v(&["-c", "k=1", flag]));
 }
+
+#[test]
+fn plain_codex_sessions_skips_codexp_runs_apps_and_own_ancestors() {
+    let ps = "\
+      1     0 /sbin/launchd
+    100     1 -/opt/homebrew/bin/fish -l
+    200   100 /Users/u/.local/bin/codex
+    201   100 codex resume --last
+    300   100 codexp exec p2
+    301   300 /Users/u/.local/bin/codex -c model_provider=\"openai\"
+    400     1 /Users/u/.codex/packages/app-server-daemon/releases/0.163.0/bin/codex app-server --listen unix:// --managed-daemon
+    500     1 /Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex -c x=1 exec-server
+    600     1 /Users/u/.vscode/extensions/openai.chatgpt-1/bin/macos-aarch64/codex app-server
+    700   100 /Users/u/.local/bin/codex
+    701   700 /bin/zsh -lc codexp active p1
+    702   701 codexp active p1
+    800   100 /Users/u/.codex/packages/standalone/bin/codex-code-mode-host
+";
+    assert_eq!(
+        agyp::codex::exec::plain_codex_sessions(ps, 702),
+        vec![200, 201]
+    );
+}

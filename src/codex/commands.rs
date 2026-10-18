@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -75,22 +75,19 @@ fn read_export(from: &Path) -> Result<Value, String> {
     serde_json::from_str(&raw).map_err(|e| format!("{} is not valid JSON: {e}", from.display()))
 }
 
-pub fn cmd_import(name: &str, from: &Path, force: bool, remove_source: bool) -> Result<(), i32> {
-    crate::security::validate_component(name, "profile name").map_err(|e| fail(e, 1))?;
-    let export = read_export(from).map_err(|e| fail(e, 1))?;
-    let summary = inspect_auth(&export).map_err(|e| fail(format!("{}: {e}", from.display()), 1))?;
+/// Validates an export and stores it as profile `name`, returning the account it holds.
+fn import_export(name: &str, export: &Value, force: bool) -> Result<AccountSummary, String> {
+    crate::security::validate_component(name, "profile name")?;
+    let summary = inspect_auth(export)?;
     let now = Utc::now();
     if summary.access_expires_at <= now + MIN_TOKEN_VALIDITY {
-        return Err(fail(
-            format!(
-                "access token for {} expired at {}. Refresh the account in OmniRoute and export again.",
-                summary.email,
-                fmt_local(summary.access_expires_at)
-            ),
-            1,
+        return Err(format!(
+            "access token for {} expired at {}. Refresh the account in OmniRoute and export again.",
+            summary.email,
+            fmt_local(summary.access_expires_at)
         ));
     }
-    let sanitized = sanitize_for_import(&export, now).map_err(|e| fail(e, 1))?;
+    let sanitized = sanitize_for_import(export, now)?;
     let home = home_dir(name);
 
     ProfileRegistry::update(&registry_path(), |reg| {
@@ -127,8 +124,14 @@ pub fn cmd_import(name: &str, from: &Path, force: bool, remove_source: bool) -> 
             created_at,
             last_used_at,
         })
-    })
-    .map_err(|e| fail(e, 1))?;
+    })?;
+    Ok(summary)
+}
+
+pub fn cmd_import(name: &str, from: &Path, force: bool, remove_source: bool) -> Result<(), i32> {
+    let export = read_export(from).map_err(|e| fail(e, 1))?;
+    let summary = import_export(name, &export, force)
+        .map_err(|e| fail(format!("{}: {e}", from.display()), 1))?;
 
     if remove_source {
         if let Err(e) = fs::remove_file(from) {
@@ -144,9 +147,138 @@ pub fn cmd_import(name: &str, from: &Path, force: bool, remove_source: bool) -> 
         summary.email,
         summary.plan.as_deref().unwrap_or("unknown plan"),
         fmt_local(summary.access_expires_at),
-        fmt_remaining(summary.access_expires_at, now)
+        fmt_remaining(summary.access_expires_at, Utc::now())
     );
     println!("Token refresh is disabled for codexp; re-import a fresh export before it expires.");
+    Ok(())
+}
+
+/// The profile that already holds `account`: by the account id of its credentials, or by email
+/// when its credentials are unreadable.
+fn profile_for_account(reg: &ProfileRegistry, account: &AccountSummary) -> Option<String> {
+    let mut names: Vec<&String> = reg.profiles.keys().collect();
+    names.sort();
+    names
+        .iter()
+        .find(|name| {
+            load_profile_auth(&reg.profiles[**name].dir)
+                .is_ok_and(|(_, s)| s.account_id == account.account_id)
+        })
+        .or_else(|| {
+            names.iter().find(|name| {
+                reg.profiles[**name]
+                    .email
+                    .eq_ignore_ascii_case(&account.email)
+            })
+        })
+        .map(|name| name.to_string())
+}
+
+/// `profile-<n>` with `n` one past the highest number in use.
+fn next_profile_name(reg: &ProfileRegistry) -> String {
+    let n = reg
+        .profiles
+        .keys()
+        .filter_map(|name| name.strip_prefix("profile-")?.parse::<u32>().ok())
+        .max()
+        .unwrap_or(0);
+    format!("profile-{}", n + 1)
+}
+
+/// Asks for an alias of a newly added profile until one is set or the answer is empty.
+fn prompt_alias(profile: &str, email: &str) {
+    loop {
+        print!("Alias for new profile '{profile}' ({email}), empty to skip: ");
+        let _ = io::stdout().flush();
+        let mut answer = String::new();
+        if io::stdin().read_line(&mut answer).unwrap_or(0) == 0 {
+            return;
+        }
+        let alias = answer.trim();
+        if alias.is_empty() || cmd_alias_set(alias, profile).is_ok() {
+            return;
+        }
+    }
+}
+
+/// Re-imports every `*.json` export in `dir`. An account that already has a profile is imported
+/// into it; a new account becomes the next `profile-<n>` and, on a terminal, is asked for an
+/// alias. When plain `codex` uses one of the synced accounts, its login is refreshed too.
+pub fn cmd_sync(dir: &Path) -> Result<(), i32> {
+    let entries =
+        fs::read_dir(dir).map_err(|e| fail(format!("cannot read {}: {e}", dir.display()), 1))?;
+    let mut files: Vec<_> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && p.extension().is_some_and(|ext| ext == "json"))
+        .collect();
+    files.sort();
+
+    let mut failed = 0;
+    // The freshest export of each account wins.
+    let mut exports: Vec<(std::path::PathBuf, Value, AccountSummary)> = Vec::new();
+    for file in files {
+        match read_export(&file).and_then(|v| inspect_auth(&v).map(|s| (v, s))) {
+            Ok((export, summary)) => {
+                match exports
+                    .iter_mut()
+                    .find(|(_, _, s)| s.account_id == summary.account_id)
+                {
+                    Some(kept) if kept.2.access_expires_at >= summary.access_expires_at => {}
+                    Some(kept) => *kept = (file, export, summary),
+                    None => exports.push((file, export, summary)),
+                }
+            }
+            Err(e) => {
+                failed += 1;
+                eprintln!("skipped {}: {e}", file.display());
+            }
+        }
+    }
+    if exports.is_empty() && failed == 0 {
+        println!("No *.json exports in {}.", dir.display());
+        return Ok(());
+    }
+
+    let interactive = io::stdin().is_terminal();
+    let mut synced = Vec::new();
+    for (file, export, summary) in exports {
+        let reg = load_registry()?;
+        let (name, is_new) = match profile_for_account(&reg, &summary) {
+            Some(name) => (name, false),
+            None => (next_profile_name(&reg), true),
+        };
+        if let Err(e) = import_export(&name, &export, false) {
+            failed += 1;
+            eprintln!("skipped {}: {e}", file.display());
+            continue;
+        }
+        println!(
+            "{} {name}: {}, access token valid until {} ({})",
+            if is_new { "added  " } else { "updated" },
+            summary.email,
+            fmt_local(summary.access_expires_at),
+            fmt_remaining(summary.access_expires_at, Utc::now())
+        );
+        if is_new {
+            if interactive {
+                prompt_alias(&name, &summary.email);
+            } else {
+                println!("  set an alias with 'codexp alias set <alias> {name}'");
+            }
+        }
+        synced.push((name, summary.account_id));
+    }
+
+    let target = active_codex_dir().map_err(|e| fail(e, 1))?;
+    if let Ok((_, active)) = load_profile_auth(&target) {
+        if let Some((name, _)) = synced.iter().find(|(_, id)| *id == active.account_id) {
+            cmd_active(Some(name))?;
+        }
+    }
+    if failed > 0 {
+        return Err(fail(format!("{failed} export(s) could not be synced"), 1));
+    }
     Ok(())
 }
 
@@ -378,8 +510,39 @@ pub fn cmd_active(profile_name: Option<&str>) -> Result<(), i32> {
         "Token refresh stays disabled; run 'codexp active {}' again after re-importing.",
         profile.name
     );
+    // Sessions on this machine use the real ~/.codex, not an overridden one (tests).
+    if std::env::var_os("CODEXP_ACTIVE_CODEX_HOME").is_none() {
+        stop_plain_codex_sessions();
+    }
     restart_app_server_daemon(&target);
     Ok(())
+}
+
+/// Stops running plain `codex` CLI sessions: each keeps the login it started with. Their
+/// rollouts are on disk, so `codex resume` continues them under the new login.
+fn stop_plain_codex_sessions() {
+    let Ok(out) = std::process::Command::new("ps")
+        .args(["-axo", "pid=,ppid=,command="])
+        .output()
+    else {
+        return;
+    };
+    let pids = super::exec::plain_codex_sessions(
+        &String::from_utf8_lossy(&out.stdout),
+        std::process::id(),
+    );
+    let stopped: Vec<String> = pids
+        .into_iter()
+        .filter(|pid| unsafe { libc::kill(*pid as libc::pid_t, libc::SIGTERM) } == 0)
+        .map(|pid| pid.to_string())
+        .collect();
+    if !stopped.is_empty() {
+        println!(
+            "Stopped {} plain codex session(s) (pid {}) still on the previous login; continue them with 'codex resume'.",
+            stopped.len(),
+            stopped.join(", ")
+        );
+    }
 }
 
 /// A plain `codex` command for the user's own CODEX_HOME, free of anything a surrounding codexp
