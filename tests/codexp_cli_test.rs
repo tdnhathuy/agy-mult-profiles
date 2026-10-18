@@ -576,3 +576,52 @@ fn legacy_shared_history_moves_into_plain_codex() {
             .to_string()
     );
 }
+
+#[test]
+fn sync_reimports_known_accounts_and_adds_new_ones() {
+    let env = Env::new();
+    let a = write_export(env.tmp.path(), "a@x.com", "acct-a", 86_400 * 2);
+    assert!(env
+        .run(&["import", "c1", "--from", a.to_str().unwrap()])
+        .status
+        .success());
+    assert!(env.run(&["active", "c1"]).status.success());
+
+    let dir = env.tmp.path().join("exports");
+    fs::create_dir_all(&dir).unwrap();
+    // Two exports of account a: the one that expires later wins.
+    let fresh = write_export(&dir, "a@x.com", "acct-a", 86_400 * 9);
+    fs::rename(&fresh, dir.join("a-fresh.json")).unwrap();
+    write_export(&dir, "a@x.com", "acct-a", 86_400 * 5);
+    write_export(&dir, "b@x.com", "acct-b", 86_400 * 3);
+    fs::write(dir.join("broken.json"), "not json").unwrap();
+    fs::write(dir.join("notes.txt"), "ignored").unwrap();
+
+    let out = env.run(&["sync", dir.to_str().unwrap()]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // The broken export is reported and fails the run, but the others still sync.
+    assert_eq!(out.status.code(), Some(1), "{stdout}{stderr}");
+    assert!(stderr.contains("broken.json"), "{stderr}");
+    assert!(stdout.contains("updated c1: a@x.com"), "{stdout}");
+    assert!(stdout.contains("added   profile-1: b@x.com"), "{stdout}");
+    assert!(
+        stdout.contains("codexp alias set <alias> profile-1"),
+        "{stdout}"
+    );
+
+    let token = |path: &Path| -> String {
+        let v: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        v["tokens"]["access_token"].as_str().unwrap().to_string()
+    };
+    let exported: Value =
+        serde_json::from_str(&fs::read_to_string(dir.join("a-fresh.json")).unwrap()).unwrap();
+    let fresh_token = exported["tokens"]["access_token"].as_str().unwrap();
+    assert_eq!(
+        token(&env.profiles().join("homes/c1/auth.json")),
+        fresh_token
+    );
+    // Plain codex was logged in as c1, so its login follows the re-import.
+    assert_eq!(token(&env.codex().join("auth.json")), fresh_token);
+    assert!(env.profiles().join("homes/profile-1/auth.json").is_file());
+}
