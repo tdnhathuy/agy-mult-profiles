@@ -196,3 +196,39 @@ fn parses_free_plan_single_window_and_limit_reached() {
     assert!(u.secondary.is_none());
     assert!(parse_usage(&json!({"detail": "nope"}), Utc::now()).is_err());
 }
+
+#[test]
+fn exec_places_overrides_and_bypass_where_codex_reads_them() {
+    use agyp::codex::commands::exec_args;
+    let v = |args: &[&str]| args.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    let flag = "--dangerously-bypass-approvals-and-sandbox";
+    let bare = |args: &[&str]| exec_args(&v(args), &[]);
+
+    assert_eq!(bare(&[]), v(&[flag]));
+    assert_eq!(bare(&["fix the bug"]), v(&[flag, "fix the bug"]));
+    assert_eq!(bare(&["-m", "gpt-5.5"]), v(&[flag, "-m", "gpt-5.5"]));
+    assert_eq!(
+        bare(&["exec", "resume", "--last"]),
+        v(&["exec", flag, "resume", "--last"])
+    );
+    assert_eq!(bare(&["resume", "--last"]), v(&["resume", flag, "--last"]));
+    // Non-agent subcommands and an explicit policy get no bypass.
+    assert_eq!(bare(&["mcp", "list"]), v(&["mcp", "list"]));
+    assert_eq!(bare(&["-s", "read-only"]), v(&["-s", "read-only"]));
+    assert_eq!(
+        bare(&["exec", "--ask-for-approval=on-request", "hi"]),
+        v(&["exec", "--ask-for-approval=on-request", "hi"])
+    );
+
+    // Agent subcommands read overrides only after their own name.
+    let config = v(&["-c", "k=1"]);
+    assert_eq!(
+        exec_args(&v(&["exec", "hi"]), &config),
+        v(&["exec", "-c", "k=1", flag, "hi"])
+    );
+    assert_eq!(
+        exec_args(&v(&["mcp", "list"]), &config),
+        v(&["-c", "k=1", "mcp", "list"])
+    );
+    assert_eq!(exec_args(&[], &config), v(&["-c", "k=1", flag]));
+}

@@ -56,6 +56,10 @@ impl Env {
         Self { tmp }
     }
 
+    fn claude(&self) -> PathBuf {
+        self.tmp.path().join("claude")
+    }
+
     fn profiles(&self) -> PathBuf {
         self.tmp.path().join("profiles")
     }
@@ -65,6 +69,7 @@ impl Env {
             .args(args)
             .env("CODEXP_PROFILES_DIR", self.profiles())
             .env("CODEXP_CODEX_BIN", self.tmp.path().join("fake-codex"))
+            .env("CLAUDE_CONFIG_DIR", self.claude())
             .env("OPENAI_API_KEY", "should-be-stripped")
             .output()
             .unwrap()
@@ -249,4 +254,146 @@ fn task_with_expired_profile_exits_unauthenticated() {
         !env.tmp.path().join("args").exists(),
         "codex must not start"
     );
+}
+
+#[test]
+fn profiles_share_session_history() {
+    let env = Env::new();
+    let a = write_export(env.tmp.path(), "a@x.com", "acct-a", 86_400 * 3);
+    let b = write_export(env.tmp.path(), "b@x.com", "acct-b", 86_400 * 3);
+    assert!(env
+        .run(&["import", "c1", "--from", a.to_str().unwrap()])
+        .status
+        .success());
+
+    // c2 recorded history of its own before history was shared.
+    let c2 = env.profiles().join("homes/c2");
+    let day = c2.join("sessions/2026/10/18");
+    fs::create_dir_all(&day).unwrap();
+    fs::write(day.join("rollout-x-t-2.jsonl"), "{}\n").unwrap();
+    fs::write(c2.join("history.jsonl"), "{\"session_id\":\"t-2\"}\n").unwrap();
+    assert!(env
+        .run(&["import", "c2", "--from", b.to_str().unwrap()])
+        .status
+        .success());
+
+    let shared = env.profiles().join("shared");
+    let c1 = env.profiles().join("homes/c1");
+    for home in [&c1, &c2] {
+        for entry in ["sessions", "history.jsonl"] {
+            assert!(fs::symlink_metadata(home.join(entry))
+                .unwrap()
+                .file_type()
+                .is_symlink());
+        }
+    }
+    assert!(c1.join("sessions/2026/10/18/rollout-x-t-2.jsonl").is_file());
+    assert_eq!(
+        fs::read_to_string(shared.join("history.jsonl")).unwrap(),
+        "{\"session_id\":\"t-2\"}\n"
+    );
+
+    let out = env.run(&["exec", "c1", "--", "resume", "t-2"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let logged_env = fs::read_to_string(env.tmp.path().join("env")).unwrap();
+    assert!(logged_env.contains(&format!(
+        "CODEX_SQLITE_HOME={}",
+        shared.join("sqlite").display()
+    )));
+    let args = fs::read_to_string(env.tmp.path().join("args")).unwrap();
+    assert!(
+        args.starts_with("resume\n-c\n")
+            && args.ends_with("\n--dangerously-bypass-approvals-and-sandbox\nt-2\n"),
+        "{args}"
+    );
+}
+
+#[test]
+fn claude_skills_and_mcp_servers_reach_codex() {
+    let env = Env::new();
+    let claude = env.claude();
+    let plugin = env.tmp.path().join("plugin");
+    for skill in [
+        claude.join("skills/review"),
+        claude.join("skills/synced/org/pdf"),
+        plugin.join("skills/review"),
+    ] {
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(skill.join("SKILL.md"), "---\nname: x\n---\n").unwrap();
+    }
+    fs::create_dir_all(claude.join("plugins")).unwrap();
+    fs::write(
+        claude.join("settings.json"),
+        json!({"enabledPlugins": {"tools@market": true, "off@market": false}}).to_string(),
+    )
+    .unwrap();
+    fs::write(
+        claude.join("plugins/installed_plugins.json"),
+        json!({"plugins": {"tools@market": [{"installPath": plugin}]}}).to_string(),
+    )
+    .unwrap();
+    fs::write(
+        plugin.join(".mcp.json"),
+        json!({"mcpServers": {"docs": {"type": "http", "url": "https://docs.test/mcp",
+            "headers": {"Authorization": "Bearer ${DOCS_TOKEN:-none}"}}}})
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        claude.join(".claude.json"),
+        json!({"mcpServers": {
+            "mem": {"type": "stdio", "command": "${CLAUDE_PLUGIN_ROOT}/mem", "args": ["--fast"],
+                    "env": {"MEM_KEY": "s3cret"}},
+            "old": {"type": "sse", "url": "https://sse.test"}
+        }})
+        .to_string(),
+    )
+    .unwrap();
+
+    let export = write_export(env.tmp.path(), "a@x.com", "acct-a", 86_400 * 3);
+    assert!(env
+        .run(&["import", "c1", "--from", export.to_str().unwrap()])
+        .status
+        .success());
+    let skills = env.profiles().join("homes/c1/skills");
+    assert!(fs::metadata(&skills).unwrap().is_dir());
+    let mut names: Vec<String> = fs::read_dir(&skills)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["pdf", "review", "tools-review"]);
+
+    let out = env.run(&["exec", "c1", "--", "mcp", "list"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("'old' skipped"));
+    let args = fs::read_to_string(env.tmp.path().join("args")).unwrap();
+    assert!(
+        args.contains(
+            "mcp_servers.mem={ command = \"/mem\", args = [\"--fast\"], env_vars = [\"MEM_KEY\"] }"
+        ),
+        "{args}"
+    );
+    assert!(
+        args.contains("mcp_servers.docs={ url = \"https://docs.test/mcp\", env_http_headers = { \"Authorization\" = \"CODEXP_MCP_SECRET_DOCS_0\" } }"),
+        "{args}"
+    );
+    assert!(!args.contains("s3cret"), "secrets stay out of argv");
+    let logged_env = fs::read_to_string(env.tmp.path().join("env")).unwrap();
+    assert!(logged_env.contains("MEM_KEY=s3cret"));
+    assert!(logged_env.contains("CODEXP_MCP_SECRET_DOCS_0=Bearer none"));
+
+    // A skill removed from Claude disappears from the profile on the next run.
+    fs::remove_dir_all(claude.join("skills/review")).unwrap();
+    env.run(&["exec", "c1", "--", "mcp", "list"]);
+    assert!(fs::symlink_metadata(skills.join("tools-review")).is_err());
+    assert!(fs::symlink_metadata(skills.join("review")).is_ok());
 }
