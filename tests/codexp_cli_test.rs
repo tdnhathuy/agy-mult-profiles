@@ -60,6 +60,10 @@ impl Env {
         self.tmp.path().join("claude")
     }
 
+    fn codex(&self) -> PathBuf {
+        self.tmp.path().join("dot-codex")
+    }
+
     fn profiles(&self) -> PathBuf {
         self.tmp.path().join("profiles")
     }
@@ -70,6 +74,7 @@ impl Env {
             .env("CODEXP_PROFILES_DIR", self.profiles())
             .env("CODEXP_CODEX_BIN", self.tmp.path().join("fake-codex"))
             .env("CLAUDE_CONFIG_DIR", self.claude())
+            .env("CODEXP_ACTIVE_CODEX_HOME", self.codex())
             .env("OPENAI_API_KEY", "should-be-stripped")
             .output()
             .unwrap()
@@ -277,7 +282,7 @@ fn profiles_share_session_history() {
         .status
         .success());
 
-    let shared = env.profiles().join("shared");
+    let shared = env.codex();
     let c1 = env.profiles().join("homes/c1");
     for home in [&c1, &c2] {
         for entry in ["sessions", "history.jsonl"] {
@@ -300,10 +305,7 @@ fn profiles_share_session_history() {
         String::from_utf8_lossy(&out.stderr)
     );
     let logged_env = fs::read_to_string(env.tmp.path().join("env")).unwrap();
-    assert!(logged_env.contains(&format!(
-        "CODEX_SQLITE_HOME={}",
-        shared.join("sqlite").display()
-    )));
+    assert!(logged_env.contains(&format!("CODEX_SQLITE_HOME={}\n", shared.display())));
     let args = fs::read_to_string(env.tmp.path().join("args")).unwrap();
     assert!(
         args.starts_with("resume\n-c\n")
@@ -396,4 +398,181 @@ fn claude_skills_and_mcp_servers_reach_codex() {
     env.run(&["exec", "c1", "--", "mcp", "list"]);
     assert!(fs::symlink_metadata(skills.join("tools-review")).is_err());
     assert!(fs::symlink_metadata(skills.join("review")).is_ok());
+}
+
+#[test]
+fn active_swaps_plain_codex_login_and_backs_up_once() {
+    let env = Env::new();
+    let a = write_export(env.tmp.path(), "a@x.com", "acct-a", 86_400 * 3);
+    let b = write_export(env.tmp.path(), "b@x.com", "acct-b", 86_400 * 3);
+    for (name, file) in [("c1", &a), ("c2", &b)] {
+        assert!(env
+            .run(&["import", name, "--from", file.to_str().unwrap()])
+            .status
+            .success());
+    }
+    let stdout = |args: &[&str]| String::from_utf8_lossy(&env.run(args).stdout).to_string();
+    let auth = env.codex().join("auth.json");
+    let backup = env.codex().join("auth.json.pre-codexp");
+
+    assert!(stdout(&["active"]).contains("no usable ChatGPT login"));
+
+    // A login codexp did not write is kept aside before the first swap.
+    fs::create_dir_all(env.codex()).unwrap();
+    fs::copy(&a, &auth).unwrap();
+    assert!(stdout(&["active"]).contains("c1 (a@x.com)"));
+    assert!(env.run(&["active", "c2"]).status.success());
+    assert_eq!(
+        fs::read_to_string(&backup).unwrap(),
+        fs::read_to_string(&a).unwrap()
+    );
+    let active: Value = serde_json::from_str(&fs::read_to_string(&auth).unwrap()).unwrap();
+    assert_eq!(active["tokens"]["account_id"], "acct-b");
+    assert_eq!(active["tokens"]["refresh_token"], "codexp-refresh-disabled");
+    assert_eq!(
+        fs::metadata(&auth).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert!(stdout(&["active"]).contains("c2 (b@x.com)"));
+
+    // Swapping between codexp profiles leaves the original backup alone.
+    assert!(env.run(&["active", "c1"]).status.success());
+    assert!(stdout(&["active"]).contains("c1 (a@x.com)"));
+    assert_eq!(
+        fs::read_to_string(&backup).unwrap(),
+        fs::read_to_string(&a).unwrap()
+    );
+
+    assert_eq!(env.run(&["active", "nope"]).status.code(), Some(1));
+
+    // A running app-server daemon caches the old login, so activation restarts it.
+    let log = env.tmp.path().join("daemon-calls");
+    fs::write(
+        env.tmp.path().join("fake-codex"),
+        format!(
+            "#!/bin/sh\necho \"$* CODEX_HOME=$CODEX_HOME\" >> '{}'\n\
+             [ \"$3\" = version ] && echo '{{\"status\":\"running\"}}'\nexit 0\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    let out = stdout(&["active", "c2"]);
+    assert!(
+        out.contains("Restarted the Codex app-server daemon"),
+        "{out}"
+    );
+    let calls = fs::read_to_string(&log).unwrap();
+    let home = env.codex().display().to_string();
+    assert_eq!(
+        calls.lines().collect::<Vec<_>>(),
+        [
+            format!("app-server daemon version CODEX_HOME={home}"),
+            format!("app-server daemon restart CODEX_HOME={home}"),
+        ]
+    );
+}
+
+fn sql(db: &Path, statements: &str) -> String {
+    let out = Command::new("sqlite3")
+        .arg(db)
+        .arg(statements)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// A `state_5.sqlite` with the columns and tables the migration touches.
+fn thread_index(db: &Path, threads: &[(&str, &str, Option<&str>)]) {
+    fs::create_dir_all(db.parent().unwrap()).unwrap();
+    let mut statements = String::from(
+        "CREATE TABLE _sqlx_migrations (version INTEGER); INSERT INTO _sqlx_migrations VALUES (61);\
+         CREATE TABLE thread_sections (id TEXT PRIMARY KEY); CREATE TABLE projects (id TEXT PRIMARY KEY);\
+         CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, thread_section_id TEXT,\
+           section_position INTEGER, section_entered_at_ms INTEGER, project_id TEXT);\
+         CREATE TABLE thread_read_receipts (thread_id TEXT PRIMARY KEY);\
+         CREATE TABLE thread_dynamic_tools (thread_id TEXT PRIMARY KEY);\
+         CREATE TABLE thread_spawn_edges (child_thread_id TEXT PRIMARY KEY);\
+         CREATE TABLE thread_attachments (id TEXT PRIMARY KEY);",
+    );
+    for (id, path, section) in threads {
+        let section = section.map_or("NULL".to_string(), |s| format!("'{s}'"));
+        statements +=
+            &format!("INSERT INTO threads VALUES ('{id}', '{path}', {section}, 1, 1, NULL);");
+    }
+    sql(db, &statements);
+}
+
+#[test]
+fn legacy_shared_history_moves_into_plain_codex() {
+    let env = Env::new();
+    let legacy = env.profiles().join("shared");
+    let c1 = env.profiles().join("homes/c1");
+    let day = "sessions/2026/10/18";
+    fs::create_dir_all(legacy.join(day)).unwrap();
+    fs::write(legacy.join(day).join("rollout-x-t-old.jsonl"), "{}\n").unwrap();
+    fs::write(legacy.join("history.jsonl"), "old\n").unwrap();
+    let old_rollout = c1.join(day).join("rollout-x-t-old.jsonl");
+    thread_index(
+        &legacy.join("sqlite/state_5.sqlite"),
+        &[("t-old", old_rollout.to_str().unwrap(), Some("s-old"))],
+    );
+    fs::create_dir_all(env.codex()).unwrap();
+    fs::write(env.codex().join("history.jsonl"), "plain\n").unwrap();
+    let index = env.codex().join("state_5.sqlite");
+    thread_index(&index, &[("t-plain", "/elsewhere/sessions/r.jsonl", None)]);
+
+    let a = write_export(env.tmp.path(), "a@x.com", "acct-a", 86_400 * 3);
+    let out = env.run(&["import", "c1", "--from", a.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let moved = env.codex().join(day).join("rollout-x-t-old.jsonl");
+    assert!(moved.is_file());
+    assert!(c1.join(day).join("rollout-x-t-old.jsonl").is_file());
+    assert_eq!(
+        fs::read_link(c1.join("sessions")).unwrap(),
+        env.codex().join("sessions")
+    );
+    assert_eq!(
+        fs::read_to_string(env.codex().join("history.jsonl")).unwrap(),
+        "plain\nold\n"
+    );
+    assert_eq!(
+        sql(&index, "SELECT id || '|' || rollout_path || '|' || ifnull(thread_section_id, '-') FROM threads ORDER BY id;"),
+        format!("t-old|{}|-\nt-plain|/elsewhere/sessions/r.jsonl|-", moved.display())
+    );
+    assert!(!legacy.exists());
+    assert!(env
+        .profiles()
+        .join("shared.migrated/sqlite/state_5.sqlite")
+        .is_file());
+
+    // Removing a profile repoints the threads it recorded under its own home.
+    let own = c1.join("archived_sessions/rollout-y-t-new.jsonl");
+    sql(
+        &index,
+        &format!(
+            "INSERT INTO threads VALUES ('t-new', '{}', NULL, NULL, NULL, NULL);",
+            own.display()
+        ),
+    );
+    assert!(env.run(&["rm", "c1", "-y"]).status.success());
+    assert_eq!(
+        sql(
+            &index,
+            "SELECT rollout_path FROM threads WHERE id = 't-new';"
+        ),
+        env.codex()
+            .join("archived_sessions/rollout-y-t-new.jsonl")
+            .display()
+            .to_string()
+    );
 }

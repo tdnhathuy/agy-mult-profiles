@@ -7,10 +7,16 @@ use chrono::{DateTime, Local, Utc};
 use serde::Serialize;
 use serde_json::Value;
 
-use super::auth::{inspect_auth, load_profile_auth, sanitize_for_import, AccountSummary};
+use super::auth::{
+    inspect_auth, load_profile_auth, sanitize_for_import, AccountSummary, AUTH_FILENAME,
+    REFRESH_DISABLED_SENTINEL,
+};
 use super::claude::McpOverrides;
 use super::exec::{build_codex_command, classify_exec, enforced_config_args, parse_exec_events};
-use super::home::{home_dir, homes_root, prepare_home, registry_path, write_auth};
+use super::home::{
+    active_codex_dir, home_dir, homes_root, prepare_home, registry_path, repoint_thread_rollouts,
+    write_auth,
+};
 use crate::commands::task::{
     parse_duration, resolve_task_prompt_with_timeout, validate_linked_worktree, ResolvePromptError,
     TaskFailureKind,
@@ -281,6 +287,10 @@ pub fn cmd_rm(name: &str, yes: bool) -> Result<(), i32> {
     if profile.dir.exists() {
         let dir = crate::security::validate_profile_dir_under(&profile.dir, &homes_root())
             .map_err(|e| fail(e, 1))?;
+        // Threads this profile started record rollout paths inside its home.
+        if let Err(e) = repoint_thread_rollouts(&profile.dir) {
+            eprintln!("Warning: threads started by '{name}' may not resume: {e}");
+        }
         // remove_dir_all removes the shared-entry symlinks without following them.
         fs::remove_dir_all(&dir)
             .map_err(|e| fail(format!("cannot remove {}: {e}", dir.display()), 1))?;
@@ -323,6 +333,114 @@ pub fn cmd_alias_list(json_output: bool) -> Result<(), i32> {
         for (a, p) in pairs {
             println!("{a} -> {p}");
         }
+    }
+    Ok(())
+}
+
+const ACTIVE_BACKUP_FILENAME: &str = "auth.json.pre-codexp";
+
+/// Without a profile, reports which profile plain `codex` (~/.codex) is logged in as. With one,
+/// copies that profile's credentials into ~/.codex so plain `codex`, the IDE extension and the
+/// Codex app use it. An auth.json codexp did not write is backed up once before it is replaced.
+pub fn cmd_active(profile_name: Option<&str>) -> Result<(), i32> {
+    let target = active_codex_dir().map_err(|e| fail(e, 1))?;
+    let Some(profile_name) = profile_name else {
+        return print_active(&target);
+    };
+    let (profile, summary) = resolve_ready_profile(profile_name)
+        .map_err(|(kind, msg)| fail(msg, exit_code_for(kind)))?;
+    let (mut auth, _) = load_profile_auth(&profile.dir).map_err(|e| fail(e, 2))?;
+    // Restart Codex's proactive-refresh clock: its refresh would fail on the sentinel token.
+    auth["last_refresh"] =
+        Value::from(Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+
+    let current = target.join(AUTH_FILENAME);
+    let backup = target.join(ACTIVE_BACKUP_FILENAME);
+    if let Ok(raw) = fs::read_to_string(&current) {
+        let ours = serde_json::from_str::<Value>(&raw).is_ok_and(|v| {
+            v["tokens"]["refresh_token"].as_str() == Some(REFRESH_DISABLED_SENTINEL)
+        });
+        if !ours && !backup.exists() {
+            crate::security::write_private_file(&backup, raw.as_bytes())
+                .map_err(|e| fail(format!("cannot back up {}: {e}", current.display()), 1))?;
+            println!("Backed up the previous login to {}.", backup.display());
+        }
+    }
+    write_auth(&target, &auth).map_err(|e| fail(e, 1))?;
+    println!(
+        "Plain codex ({}) now uses '{}': {}, access token valid until {}.",
+        target.display(),
+        profile.name,
+        summary.email,
+        fmt_local(summary.access_expires_at)
+    );
+    println!(
+        "Token refresh stays disabled; run 'codexp active {}' again after re-importing.",
+        profile.name
+    );
+    restart_app_server_daemon(&target);
+    Ok(())
+}
+
+/// A plain `codex` command for the user's own CODEX_HOME, free of anything a surrounding codexp
+/// run put in the environment.
+fn plain_codex_command(codex_home: &Path, args: &[&str]) -> Result<std::process::Command, String> {
+    let mut cmd = std::process::Command::new(super::exec::locate_codex_binary()?);
+    cmd.args(args)
+        .env("CODEX_HOME", codex_home)
+        .env_remove("CODEX_SQLITE_HOME")
+        .env_remove("CODEX_REFRESH_TOKEN_URL_OVERRIDE")
+        .env_remove("CODEX_REVOKE_TOKEN_URL_OVERRIDE");
+    Ok(cmd)
+}
+
+/// The Codex app-server daemon caches auth in memory and serves it to every TUI, so a running
+/// daemon keeps the previous login until it restarts. Restarting interrupts its open sessions;
+/// their rollouts stay on disk and resume afterwards.
+fn restart_app_server_daemon(codex_home: &Path) {
+    let running = plain_codex_command(codex_home, &["app-server", "daemon", "version"])
+        .and_then(|mut c| c.output().map_err(|e| e.to_string()))
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| serde_json::from_slice::<Value>(&out.stdout).ok())
+        .is_some_and(|v| v["status"] == "running");
+    if !running {
+        return;
+    }
+    let restarted = plain_codex_command(codex_home, &["app-server", "daemon", "restart"])
+        .and_then(|mut c| c.output().map_err(|e| e.to_string()));
+    match restarted {
+        Ok(out) if out.status.success() => {
+            println!("Restarted the Codex app-server daemon so it picks up the new login.")
+        }
+        Ok(out) => eprintln!(
+            "Warning: 'codex app-server daemon restart' failed: {}. Run it yourself to use the new login.",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+        Err(e) => eprintln!(
+            "Warning: cannot restart the Codex app-server daemon: {e}. Run 'codex app-server daemon restart' yourself."
+        ),
+    }
+}
+
+fn print_active(target: &Path) -> Result<(), i32> {
+    let Ok((_, active)) = load_profile_auth(target) else {
+        println!(
+            "Plain codex ({}) has no usable ChatGPT login.",
+            target.display()
+        );
+        return Ok(());
+    };
+    let reg = load_registry()?;
+    let mut names: Vec<&String> = reg.profiles.keys().collect();
+    names.sort();
+    let profile = names.into_iter().find(|name| {
+        load_profile_auth(&reg.profiles[*name].dir)
+            .is_ok_and(|(_, s)| s.account_id == active.account_id)
+    });
+    match profile {
+        Some(name) => println!("{name} ({})", active.email),
+        None => println!("{} (not a codexp profile)", active.email),
     }
     Ok(())
 }

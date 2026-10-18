@@ -89,6 +89,11 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Log plain `codex` (~/.codex) in as a profile, or show which profile it uses
+    Active {
+        /// Profile name or alias (omit to show the active profile)
+        profile: Option<String>,
+    },
     /// Run any codex command under a profile (no args = interactive TUI)
     Exec {
         /// Profile name or alias
@@ -156,6 +161,7 @@ fn main() {
         Some(Commands::Quota { profile, json }) => {
             agyp::codex::quota::cmd_quota(profile.as_deref(), *json)
         }
+        Some(Commands::Active { profile }) => commands::cmd_active(profile.as_deref()),
         Some(Commands::Exec { profile, args }) => commands::cmd_exec(profile, args),
         None => {
             println!("Use 'codexp --help' for usage instructions.");
