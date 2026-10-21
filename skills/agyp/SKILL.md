@@ -49,7 +49,7 @@ There is no plan file in the repo: the prompt files in `$TMPDIR` are the plan, a
 ### 1. Pick profiles
 
 ```bash
-agyp usage --json    # quota per profile, ~6s per profile
+agyp q --hide-gpt --json    # Gemini quota per profile, ~6s per profile
 ```
 
 Each `results[]` entry has `profile`, `email`, `status`, and `gemini.five_hour.remaining_percent` / `gemini.five_day.remaining_percent`.
@@ -58,6 +58,7 @@ Each `results[]` entry has `profile`, `email`, `status`, and `gemini.five_hour.r
 - Skip any profile where either window is 0.
 - Give each parallel task a **different** worker profile.
 - Pick the reviewer profile at step 7, when the worker finishes (quota and free profiles may have changed by then).
+- If the quota check times out or fails (for example a `503`), ignore it and assign anyway without asking the user: give each parallel task a different profile from `agyp list --json`. If only some entries error, rank the ones that returned quota and still treat the errored ones as usable. A failed check is not a blocker.
 
 ### 2. Create the worktree
 
@@ -162,7 +163,7 @@ To send a follow-up instruction to the same session: `orca terminal send --termi
 
 ### 7. Cross-review by a second AGY session
 
-**Pick the reviewer profile:** run `agyp usage --json` again and use the same ranking as step 1, but prefer a profile that is **not the worker's** and not running another task. If every other profile is busy or out of quota, use the worker's own profile in a **new** session; a fresh session has none of the worker's context, so it still reviews independently.
+**Pick the reviewer profile:** run `agyp q --hide-gpt --json` again and use the same ranking (and the same fallback on timeout or error) as step 1, but prefer a profile that is **not the worker's** and not running another task. If every other profile is busy or out of quota, use the worker's own profile in a **new** session; a fresh session has none of the worker's context, so it still reviews independently.
 
 **Write the review prompt** to `$TMPDIR/agy-<slug>-review-prompt.md`:
 
