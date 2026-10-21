@@ -392,6 +392,11 @@ impl IsolatedProfileHome {
             keychain: self.keychain.clone(),
         }
     }
+
+    /// The credential store AGY runs against with this HOME and `--gemini_dir=profile_dir`.
+    pub fn store(&self, profile_dir: &Path) -> ProfileStore {
+        ProfileStore::Keychain(self.backend(), TokenFileBackend::for_profile(profile_dir))
+    }
 }
 
 fn private_dir(path: &Path) -> Result<(), String> {
@@ -822,51 +827,77 @@ impl KeychainBackend for TokenFileBackend {
 }
 
 /// A profile's own credential store: its private Keychain on macOS, AGY's token file elsewhere.
+///
+/// On macOS, AGY 1.4+ also moves its login out of the Keychain into the profile's token file
+/// and keeps it there from then on. Once that file exists it is the live credential, so it is
+/// read first and kept in step with the Keychain; older AGY never creates it.
 #[derive(Debug, Clone)]
 pub enum ProfileStore {
-    Keychain(IsolatedKeychainBackend),
+    Keychain(IsolatedKeychainBackend, TokenFileBackend),
     TokenFile(TokenFileBackend),
 }
 
 impl KeychainBackend for ProfileStore {
     fn read_token(&self) -> Result<Option<String>, String> {
         match self {
-            Self::Keychain(b) => b.read_token(),
+            Self::Keychain(k, f) => match f.read_token()? {
+                Some(token) => Ok(Some(token)),
+                None => k.read_token(),
+            },
             Self::TokenFile(b) => b.read_token(),
         }
     }
 
     fn write_token(&self, token: &str) -> Result<(), String> {
         match self {
-            Self::Keychain(b) => b.write_token(token),
+            Self::Keychain(k, f) => {
+                if f.path().exists() {
+                    f.write_token(token)?;
+                }
+                k.write_token(token)
+            }
             Self::TokenFile(b) => b.write_token(token),
         }
     }
 
     fn delete_token(&self) -> Result<(), String> {
         match self {
-            Self::Keychain(b) => b.delete_token(),
+            Self::Keychain(k, f) => {
+                f.delete_token()?;
+                k.delete_token()
+            }
             Self::TokenFile(b) => b.delete_token(),
         }
     }
 
     fn read_token_until(&self, deadline: Instant) -> Result<Option<String>, String> {
         match self {
-            Self::Keychain(b) => b.read_token_until(deadline),
+            Self::Keychain(k, f) => match f.read_token()? {
+                Some(token) => Ok(Some(token)),
+                None => k.read_token_until(deadline),
+            },
             Self::TokenFile(b) => b.read_token_until(deadline),
         }
     }
 
     fn write_token_until(&self, token: &str, deadline: Instant) -> Result<(), String> {
         match self {
-            Self::Keychain(b) => b.write_token_until(token, deadline),
+            Self::Keychain(k, f) => {
+                if f.path().exists() {
+                    f.write_token(token)?;
+                }
+                k.write_token_until(token, deadline)
+            }
             Self::TokenFile(b) => b.write_token_until(token, deadline),
         }
     }
 
     fn delete_token_until(&self, deadline: Instant) -> Result<(), String> {
         match self {
-            Self::Keychain(b) => b.delete_token_until(deadline),
+            Self::Keychain(k, f) => {
+                f.delete_token()?;
+                k.delete_token_until(deadline)
+            }
             Self::TokenFile(b) => b.delete_token_until(deadline),
         }
     }
@@ -892,7 +923,7 @@ pub fn prepare_profile_isolation(
     if cfg!(target_os = "macos") {
         let isolated = prepare_isolated_home(profile_dir, deadline)?;
         return Ok(ProfileIsolation {
-            store: ProfileStore::Keychain(isolated.backend()),
+            store: isolated.store(profile_dir),
             home: Some(isolated.home),
         });
     }
@@ -991,12 +1022,7 @@ pub fn activate_isolated_profile<B: KeychainBackend>(
     deadline: Instant,
     lock: crate::security::ProcessLock,
 ) -> Result<KeychainGuard<ProfileKeychain<B>>, String> {
-    activate_profile_store(
-        profile_dir,
-        ProfileStore::Keychain(isolated.backend()),
-        deadline,
-        lock,
-    )
+    activate_profile_store(profile_dir, isolated.store(profile_dir), deadline, lock)
 }
 
 /// Same as [`activate_isolated_profile`] for any per-profile store.

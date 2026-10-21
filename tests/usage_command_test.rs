@@ -22,6 +22,26 @@ fn usage_transaction_timeout_allows_sixty_seconds_per_profile() {
 }
 
 #[test]
+fn usage_command_points_agy_at_the_profile_dir() {
+    let cmd = commands::usage::usage_command(
+        std::path::Path::new("/bin/agy"),
+        std::path::Path::new("/p/profiles/work"),
+    );
+    let args: Vec<_> = cmd
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        args,
+        [
+            "--gemini_dir=/p/profiles/work",
+            "--print",
+            commands::usage::USAGE_PROMPT
+        ]
+    );
+}
+
+#[test]
 fn parses_gemini_and_gpt_usage_rows() {
     let raw = concat!(
         "Gemini Models\tWeekly Limit Remaining\t42%\t2026-10-01T17:26:35Z\n",

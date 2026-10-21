@@ -436,6 +436,15 @@ fn usage_json_success(
     }
 }
 
+/// AGY's `/usage` run for one profile. `--gemini_dir` is required: without it AGY 1.4+ looks
+/// for its login in the shared `~/.gemini` and blocks on a browser sign-in instead.
+pub fn usage_command(agy_binary: &std::path::Path, profile_dir: &std::path::Path) -> Command {
+    let mut command = Command::new(agy_binary);
+    command.arg(format!("--gemini_dir={}", profile_dir.display()));
+    command.args(["--print", USAGE_PROMPT]);
+    command
+}
+
 fn run_usage_for_profile(
     profile_name: &str,
     registry: &ProfileRegistry,
@@ -463,8 +472,7 @@ fn run_usage_for_profile(
         lock,
     )?;
 
-    let mut command = Command::new(agy_binary);
-    command.args(["--print", USAGE_PROMPT]);
+    let mut command = usage_command(agy_binary, &validated_profile_dir);
     apply_profile_home(&mut command, profile_home.as_deref());
     let remaining = deadline.saturating_duration_since(Instant::now());
     let output_result = if remaining.is_zero() {

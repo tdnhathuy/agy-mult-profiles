@@ -477,6 +477,47 @@ fn test_isolated_activation_releases_lock_and_shares_profile_keychain() {
 }
 
 #[test]
+fn test_isolated_store_follows_agy_token_file_once_agy_migrates_to_it() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let fx = Fixture::new();
+    let _path = fx.path_guard();
+    let isolated =
+        prepare_isolated_home_mirroring(&fx.profile_dir, &fx.real_home, deadline()).unwrap();
+    let keychain_item = PathBuf::from(format!("{}.item", isolated.keychain.display()));
+    let token_file = fx.profile_dir.join(AGY_TOKEN_FILE);
+    let store = isolated.store(&fx.profile_dir);
+
+    // Older AGY keeps its login in the profile Keychain only.
+    store.write_token("keychain-token").unwrap();
+    assert_eq!(
+        fs::read_to_string(&keychain_item).unwrap(),
+        "keychain-token"
+    );
+    assert!(
+        !token_file.exists(),
+        "seeding must not create AGY's token file"
+    );
+    assert_eq!(store.read_token().unwrap(), Some("keychain-token".into()));
+
+    // AGY 1.4+ moves the login into its token file; that file is the live credential now.
+    fs::create_dir_all(token_file.parent().unwrap()).unwrap();
+    fs::write(&token_file, "file-token").unwrap();
+    assert_eq!(store.read_token().unwrap(), Some("file-token".into()));
+
+    store.write_token("refreshed-token").unwrap();
+    assert_eq!(fs::read_to_string(&token_file).unwrap(), "refreshed-token");
+    assert_eq!(
+        fs::read_to_string(&keychain_item).unwrap(),
+        "refreshed-token"
+    );
+
+    store.delete_token().unwrap();
+    assert!(!token_file.exists());
+    assert!(!keychain_item.exists());
+    assert_eq!(store.read_token().unwrap(), None);
+}
+
+#[test]
 fn test_prepare_isolated_home_links_shared_skills_into_profile() {
     let _lock = ENV_LOCK.lock().unwrap();
     let fx = Fixture::new();
