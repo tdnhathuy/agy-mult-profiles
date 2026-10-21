@@ -208,6 +208,7 @@ The repo ships two skills for coding agents:
 
 - `skills/agyp` — plan a requirement and delegate it to AGY across several accounts.
 - `skills/codexp` — delegate coding tasks to Codex workers pinned to specific accounts.
+- `skills/claude-worker` — fallback: delegate to Claude Code on Sonnet 5.5 when every AGY profile is out of quota.
 
 Install them for every agent on the machine:
 

@@ -56,6 +56,7 @@ Each `results[]` entry has `profile`, `email`, `status`, and `gemini.five_hour.r
 
 - Rank `available` profiles by the **lower** of their two Gemini percentages and pick the highest.
 - Skip any profile where either window is 0.
+- If **every** profile is skipped (AGY exhausted), load the `claude-worker` skill and give the tasks without a profile to Claude Sonnet 5.5 instead, without asking the user. A failed quota check is not exhaustion (next bullet).
 - Give each parallel task a **different** worker profile.
 - Pick the reviewer profile at step 7, when the worker finishes (quota and free profiles may have changed by then).
 - If the quota check times out or fails (for example a `503`), ignore it and assign anyway without asking the user: give each parallel task a different profile from `agyp list --json`. If only some entries error, rank the ones that returned quota and still treat the errored ones as usable. A failed check is not a blocker.
@@ -225,7 +226,7 @@ The reviewer's approval is a claim, not proof. Check cheaply:
 
 ## Quota exhausted
 
-Keep the task on its profile and inspect `git -C <worktree> status`. Report the blocker to the user. Moving the same task to another profile requires the user's explicit OK, because the first run's partial edits are still in the worktree. Choosing a different profile for a *new* task is always fine.
+Keep the task on its profile and inspect `git -C <worktree> status`. If every other profile is also exhausted, hand the task to Claude Sonnet 5.5 with the `claude-worker` skill's takeover prompt. Otherwise report the blocker to the user. Moving the same task to another profile requires the user's explicit OK, because the first run's partial edits are still in the worktree. Choosing a different profile for a *new* task is always fine.
 
 ## Other commands
 
