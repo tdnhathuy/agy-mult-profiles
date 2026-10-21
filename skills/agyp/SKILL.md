@@ -13,7 +13,7 @@ description: Use when the user gives a requirement to be planned and delegated t
 
 **The coordinator can be any model** (Cursor, claude-omni, Claude, Codex, Hermes…): the steps below are the same whichever one you are.
 
-**Defaults:** the AGY model is `gemini-3.8-flash-high` (fast and reliable for scoped tasks). When the reviewer approves, you close both sessions and **leave the worktree for the user to review**. Never open a PR, merge, or delete the worktree on your own; the user decides (step 8).
+**Defaults:** the AGY model is `gemini-3.8-flash-high` (fast and reliable for scoped tasks). Only `gemini-*` models are allowed, never Claude/Opus/Sonnet or other non-Gemini models (step 4). When the reviewer approves, you close both sessions and **leave the worktree for the user to review**. Never open a PR, merge, or delete the worktree on your own; the user decides (step 8).
 
 ## Never use these for AGY work
 
@@ -119,7 +119,7 @@ orca terminal send --terminal <handle> --enter \
   --text 'agyp exec <profile> -- --dangerously-skip-permissions --model gemini-3.8-flash-high -i "Read <prompt-file> and follow every instruction in it."'
 ```
 
-Change the model only if the user asks; `agy models` lists the options.
+Change the model only if the user asks; `agy models` lists the options. **Only Gemini models (`gemini-*`) are allowed**, for workers and reviewers alike. Never pass a Claude/Anthropic model (Claude, Opus, Sonnet, Haiku…) or any other non-Gemini model, even if `agy models` lists it or the user's wording is ambiguous; pick the closest `gemini-*` option instead.
 
 ### 5. Answer the one-time trust prompt
 
