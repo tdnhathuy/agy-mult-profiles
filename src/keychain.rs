@@ -72,9 +72,11 @@ pub fn extract_email_from_token_string(token_raw: &str) -> Option<String> {
         }
     }
 
-    // 3. Direct email field
-    if let Some(email) = val.get("email").and_then(|v| v.as_str()) {
-        return Some(email.to_string());
+    // 3. Direct email field (agy 1.4 writes id_token_email instead of an id_token)
+    for key in ["id_token_email", "email"] {
+        if let Some(email) = val.get(key).and_then(|v| v.as_str()) {
+            return Some(email.to_string());
+        }
     }
 
     None

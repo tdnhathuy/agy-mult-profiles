@@ -75,6 +75,22 @@ fn test_extract_email_from_nested_token_json() {
     assert_eq!(email, Some("bob@gmail.com".to_string()));
 }
 
+#[test]
+fn test_extract_email_from_id_token_email_field() {
+    // agy 1.4 stores the email directly instead of an id_token JWT.
+    let token_obj = json!({
+        "auth_method": "consumer",
+        "id_token_email": "carol@gmail.com",
+        "token": {
+            "access_token": "ya29.dummy",
+            "token_type": "Bearer"
+        }
+    });
+
+    let email = extract_email_from_token_string(&token_obj.to_string());
+    assert_eq!(email, Some("carol@gmail.com".to_string()));
+}
+
 #[derive(Clone)]
 struct AmbiguousActivationBackend {
     token: Arc<Mutex<Option<String>>>,
