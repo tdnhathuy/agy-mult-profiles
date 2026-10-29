@@ -77,14 +77,14 @@ case "$cmd" in
     ;;
   list-keychains)
     case " $* " in *" -s "*) exit 0 ;; esac
-    echo "    \"$HOME/Library/Keychains/login.keychain-db\""
+    echo "    \"$HOME/Library/Keychains/agyp.keychain-db\""
     if [ -n "$MOCK_FOREIGN_KEYCHAIN" ]; then echo "    \"$MOCK_FOREIGN_KEYCHAIN\""; fi
     echo "    \"/Library/Keychains/System.keychain\""
     exit 0
     ;;
   default-keychain)
     case " $* " in *" -s "*) exit 0 ;; esac
-    echo "    \"$HOME/Library/Keychains/login.keychain-db\""
+    echo "    \"$HOME/Library/Keychains/agyp.keychain-db\""
     exit 0
     ;;
   *)
@@ -178,7 +178,7 @@ fn test_prepare_isolated_home_creates_private_keychain_and_mirrors_home() {
     assert_eq!(isolated.home, expected_home);
     assert_eq!(
         isolated.keychain,
-        expected_home.join("Library/Keychains/login.keychain-db")
+        expected_home.join("Library/Keychains/agyp.keychain-db")
     );
     assert!(
         isolated.keychain.is_file(),

@@ -143,7 +143,7 @@ Use `agyp task` for coding work. `agyp prompt` has no worktree isolation, deadli
 ## How the isolation works
 
 - `agy` reads its token from a single Keychain item (`service=gemini`, `account=antigravity`) via `/usr/bin/security`, and `security` picks the Keychain based on `$HOME`. So `agyp` gives each profile its own HOME at `~/.gemini-profiles/homes/<name>/`:
-  - `Library/Keychains/login.keychain-db` is the profile's private Keychain. Its random password is stored in `~/.gemini-profiles/profiles/<name>/keychain_password`, and it does not auto-lock.
+  - `Library/Keychains/agyp.keychain-db` is the profile's private Keychain (not `login.keychain-db`, which macOS 27.2+ will not unlock by password). Its random password is stored in `~/.gemini-profiles/profiles/<name>/keychain_password`, and it does not auto-lock.
   - Everything else from your real HOME (`.gitconfig`, `.ssh`, `.config`, `.gemini`, `Library/*`, …) is symlinked, so git, npm and other tools keep working inside tasks. Only `Library/Keychains` and `Library/Preferences` are private.
   - Before every run, `agyp` verifies that the Keychain search list and default Keychain under the private HOME point only at the profile's Keychain, and refuses to run otherwise.
 - The private Keychain is the source of truth for the profile's token. The first run seeds it from `~/.gemini-profiles/profiles/<name>/keychain_token.json`; `agy` refreshes the token inside the private Keychain, and `agyp` backs it up to `keychain_token.json` after every run.

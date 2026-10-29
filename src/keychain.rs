@@ -337,6 +337,8 @@ impl KeychainBackend for SystemKeychainBackend {
 
 pub const ISOLATED_HOMES_DIRNAME: &str = "homes";
 pub const ISOLATED_KEYCHAIN_PASSWORD_FILENAME: &str = "keychain_password";
+/// Not `login.keychain-db`: macOS 27.2+ refuses password unlocks of any Keychain with that name.
+pub const ISOLATED_KEYCHAIN_FILENAME: &str = "agyp.keychain-db";
 const SYSTEM_KEYCHAIN_PATH: &str = "/Library/Keychains/System.keychain";
 /// Entries of the real HOME that the isolated HOME must own instead of symlinking.
 const HOME_PRIVATE_ENTRIES: &[&str] = &["Library"];
@@ -607,7 +609,7 @@ pub fn prepare_isolated_home_mirroring(
     link_shared_skills(profile_dir, real_home)?;
 
     let home = IsolatedProfileHome {
-        keychain: library.join("Keychains").join("login.keychain-db"),
+        keychain: library.join("Keychains").join(ISOLATED_KEYCHAIN_FILENAME),
         home: home_dir,
     };
     let keychain = path_str(&home.keychain)?;
