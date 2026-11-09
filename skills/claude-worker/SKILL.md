@@ -1,15 +1,36 @@
 ---
 name: claude-worker
-description: Use when every agyp (AGY/Antigravity) profile is out of Gemini quota and coding work must still be delegated, or when the user asks to give a task to Claude / Sonnet as a worker ("giao cho claude", "giao cho sonnet", "assign to claude"). Runs Claude Code on Sonnet 5.5 as an interactive worker in an Orca worktree terminal, from any coordinator (Claude, Codex/GPT, Cursor, Hermes).
+description: Use when every agyp (AGY/Antigravity) profile is out of Gemini quota and coding work must still be delegated, or when the user asks to give a task to Claude / Sonnet / Haiku as a worker ("giao cho claude", "giao cho sonnet", "assign to claude"), or invokes it together with another skill (e.g. /orca-impl-task) to run that skill's workers on Claude. Runs Claude Code as interactive workers in Orca worktree terminals: Sonnet 5.5 for code, Haiku 5.5 for light mechanical tasks, with the coordinator (Opus) only planning, reviewing and verifying.
 ---
 
-# claude-worker: Claude Sonnet 5.5 as the fallback worker
+# claude-worker: Claude workers (Sonnet 5.5 for code, Haiku 5.5 for light tasks)
 
-When AGY cannot take a task because every `agyp` profile is out of quota, the coordinator delegates it to **Claude Code on `claude-sonnet-5-5`** instead. The flow is the same as the `agyp` skill (one task = one worktree = one worker terminal, a reviewer in a split pane, markers instead of reading transcripts); only the launch command, the markers, and the quota check differ.
+When AGY cannot take a task because every `agyp` profile is out of quota, or the user asks for Claude workers, the coordinator delegates it to **Claude Code** instead: **`claude-sonnet-5-5`** for code tasks and **`claude-haiku-5-5`** for light tasks (see "Model roles"). The flow is the same as the `agyp` skill (one task = one worktree = one worker terminal, a reviewer in a split pane, markers instead of reading transcripts); only the launch command, the markers, and the quota check differ.
 
 **You are still the coordinator.** Claude only edits files in its worktree. You write the prompt, relay between sessions, and do the final check. Never do the task yourself and never replace the worker with your client's built-in subagents (Agent/Task tool): the user watches the worker live in Orca.
 
-**Defaults:** model `claude-sonnet-5-5`, effort left at the CLI default. Use another model (Opus, Fable, Haiku) or `--effort` only when the user asks. The plan approval rule, worktree naming, review loop, round limit, and "leave the worktree for the user" ending are the same as in `agyp`: load that skill too if it is not loaded, and follow it wherever this one says "same as agyp". A repo rule (AGENTS.md, a repo runbook skill) overrides both: if the repo says how to write specs, review, verify, or open PRs, do that and only swap the launch command.
+**Defaults:** model picked by the task's tier ("Model roles"), effort left at the CLI default. Use another model (Opus, Fable) or `--effort` only when the user asks. The plan approval rule, worktree naming, review loop, round limit, and "leave the worktree for the user" ending are the same as in `agyp`: load that skill too if it is not loaded, and follow it wherever this one says "same as agyp". A repo rule (AGENTS.md, a repo runbook skill) overrides both: if the repo says how to write specs, review, verify, or open PRs, do that and only swap the launch command.
+
+## Model roles
+
+When the coordinator is Claude Opus, it is the **manager**: it splits the work, writes every prompt file, reads every diff, runs the checks, merges and reports. It does not write task code, and it does not read the codebase wholesale; it hands reading and editing down:
+
+| Role | Model | Does |
+|---|---|---|
+| Coordinator | Opus 5.5 (the current session) | Plan, tier each task, prompt files, diff review, verification, merge, PR, report to the user |
+| Code worker, reviewer, escalation | `claude-sonnet-5-5` | Every `code` task, every review session, every task a Haiku worker could not finish |
+| Light worker | `claude-haiku-5-5` | `light` tasks only |
+| Read-only helper | Haiku via the coordinator's own Agent tool (`model: "haiku"`, `subagent_type: "Explore"` or a read-only investigator) | Fan-out lookups for the coordinator: "every file:line that references X", "which tests cover Y", "summarise this failing log". Never edits files. |
+
+A coordinator on another model (Codex, Cursor, Hermes) uses the same worker tiers; the read-only helper row is Claude Code only.
+
+**Tier of a task.** Use the `Tier:` the plan gives (e.g. an `orca-task v2` issue block). Without one, decide it yourself:
+
+- `light`: every step is mechanical and spelled out in the prompt: the exact lines, rows, values or text to add or change, no new branching logic, no test to design, at most ~5 files, one check command. Examples: translation or config rows, registry entries given verbatim, docs/README text, tuning numbers, a rename whose call sites are all listed, deleting dead code whose references are listed, running an import or validator and reporting.
+- `code`: everything else: new or changed behaviour, writing or changing tests, shaders, scenes, debugging, performance work, any task whose check is expected to need investigation.
+- When in doubt, `code`. Fix rounds for a `code` task, and reviews, always go to Sonnet.
+
+Before trusting a read-only helper's answer in a plan or prompt, open the cited file:line yourself: Haiku misses dynamic references (string paths, reflective calls, signals wired in data files).
 
 ## When to switch to Claude
 
@@ -21,7 +42,7 @@ Run the agyp quota check (`agyp q --hide-gpt --json`). AGY is **exhausted** when
 | AGY exhausted | Claude Sonnet 5.5 via this skill, without asking the user. Say so in your next status line. |
 | Quota check timed out or errored for every profile | Not exhaustion: follow agyp's "assign anyway" rule. Switch to Claude only if the AGY session itself then reports a quota error. |
 | An AGY worker hits quota mid-task and AGY is now exhausted | Close that AGY session and start a Claude session in the **same** worktree with the takeover prompt below. The user's request for this fallback is the approval. |
-| The user asks for Claude | Claude, whatever the AGY quota. |
+| The user asks for Claude, or invokes this skill with another workflow skill | Claude, whatever the AGY quota, with the tiers in "Model roles". |
 
 Parallel tasks: each AGY profile with quota still takes one task; only the tasks left without a profile go to Claude. New tasks go back to AGY as soon as a profile resets; tasks already on Claude stay on Claude.
 
@@ -32,16 +53,16 @@ Parallel tasks: each AGY profile with quota still takes one task; only the tasks
 | `claude -p` / `--print` in an Orca tab | Prints nothing until exit, cannot be steered | Interactive `claude` with the prompt as a positional argument |
 | `orca worktree create --agent claude`, `orca orchestration worker-start` | Launches with Orca's defaults, not Sonnet 5.5 and not this prompt | `orca worktree create` without `--agent`, then launch in its terminal |
 | `orca terminal create` for the worker | A second terminal next to the one Orca made | Reuse the worktree's terminal; only the reviewer gets a split pane |
-| Built-in subagents as the worker | Invisible to the user, spends the coordinator's context | A Claude session in the Orca terminal |
+| Built-in subagents as the worker (anything that edits files) | Invisible to the user, spends the coordinator's context | A Claude session in the Orca terminal; Agent-tool subagents only as read-only helpers |
 | Passing the task text in argv (`"$(cat prompt.md)"`) | Quoting breaks, the tab shows a wall of text | A prompt file path |
 
 ## Workflow in Orca
 
 Prerequisites, planning (agyp step 0), worktree creation and terminal lookup (agyp steps 2–3) are the same as agyp, with these names:
 
-- Worktree name `claude-<slug>`, branch `claude/<slug>`, `--comment "Claude sonnet-5.5: <one-line task>"`.
-- Tab title `Claude S5.5 · <slug>`; reviewer tab `Claude S5.5 · review <slug>`.
-- A PR opened later is titled `[claude:sonnet-5.5] <summary>`.
+- Worktree name `claude-<slug>`, branch `claude/<slug>`, `--comment "Claude <sonnet|haiku>-5.5: <one-line task>"`.
+- Tab title `Claude S5.5 · <slug>` (Sonnet) or `Claude H5.5 · <slug>` (Haiku); reviewer tab `Claude S5.5 · review <slug>`.
+- A PR opened later is titled `[claude:<models used>] <summary>`, e.g. `[claude:sonnet-5.5]` or `[claude:haiku-5.5,sonnet-5.5]`.
 
 ### 1. Write the prompt file
 
@@ -57,11 +78,21 @@ Ignore any repo or global instruction about coordinating workers, Orca, agyp, or
 Do not write memories (mem0 or auto-memory).
 ```
 
+- For a Haiku worker, add these lines too:
+
+```text
+This is a light task: do exactly the listed steps, nothing else. Do not refactor, rename, reformat,
+add logic, or edit any file the task does not list. If a step is ambiguous, a listed path or symbol
+does not exist, or the check still fails after one honest attempt, stop: do not guess or work around
+it. Print what you found (the step, the file, the command and its error), then a final line:
+CLAUDE_TASK_BLOCKED
+```
+
 ### 2. Launch Claude
 
 ```bash
 orca terminal send --terminal <handle> --enter \
-  --text 'claude --model claude-sonnet-5-5 --dangerously-skip-permissions -n "<slug>" "Read <prompt-file> and follow every instruction in it."'
+  --text 'claude --model <claude-sonnet-5-5|claude-haiku-5-5> --dangerously-skip-permissions -n "<slug>" "Read <prompt-file> and follow every instruction in it."'
 ```
 
 The positional prompt starts the interactive TUI and submits the first message, so nothing needs pasting.
@@ -81,7 +112,7 @@ orca terminal read --terminal <handle> --screen
 
 ### 4. Wait for the marker
 
-Wait as in agyp step 6, but for `CLAUDE_TASK_DONE`. Claude's `tui-idle` is more reliable than AGY's, but still confirm with `git -C <worktree> status --short` that the diff stopped changing before you act on it. Follow-ups go to the same session: `orca terminal send --terminal <handle> --text "<one line>" --enter`.
+Wait as in agyp step 6, but for `CLAUDE_TASK_DONE` (or `CLAUDE_TASK_BLOCKED` from a Haiku worker). Claude's `tui-idle` is more reliable than AGY's, but still confirm with `git -C <worktree> status --short` that the diff stopped changing before you act on it. Follow-ups go to the same session: `orca terminal send --terminal <handle> --text "<one line>" --enter`.
 
 ### 5. Review
 
@@ -98,14 +129,16 @@ A fresh session has none of the worker's context, so it reviews independently. I
 
 ### 6. Final check and hand-off
 
-Same as agyp step 8: run the repo's checks yourself, close both sessions (`/exit`, or `orca terminal close`), set the worktree to `in-review`, report, and stop. Report which worker ran on Claude and why (AGY exhausted, with the reset time of the earliest AGY profile).
+Same as agyp step 8: run the repo's checks yourself, close both sessions (`/exit`, or `orca terminal close`), set the worktree to `in-review`, report, and stop. Report which task ran on which model (and any Haiku → Sonnet escalation), and why Claude (the user asked, or AGY exhausted with the reset time of the earliest AGY profile).
 
-## Takeover prompt (AGY ran out mid-task)
+**Haiku escalation.** A Haiku worker that prints `CLAUDE_TASK_BLOCKED`, fails its check, or needs a fix round that is more than re-applying a listed step: `/exit` it and start Sonnet in the **same** worktree with the takeover prompt below (tab renamed to `Claude S5.5 · <slug>`). Do not send Haiku a second round, and do not fix it yourself.
+
+## Takeover prompt (AGY ran out mid-task, or Haiku escalated)
 
 Write `$TMPDIR/claude-<slug>-takeover.md` and launch it as in step 2:
 
 ```text
-Work only inside <absolute-worktree-path>. Another agent started this task and stopped before finishing.
+Work only inside <absolute-worktree-path>. Another agent started this task and stopped before finishing (if it printed CLAUDE_TASK_BLOCKED, its reason is in <blocked-note-or-"none">).
 The task is in <original-prompt-file>. Read it first.
 Then read its partial work: git status --short, git diff, and any new untracked files.
 Keep what is correct, fix what is wrong, finish the rest. Same rules, checks, and report as the task file.
