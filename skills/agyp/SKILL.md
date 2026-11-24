@@ -13,7 +13,7 @@ description: Use when the user gives a requirement to be planned and delegated t
 
 **The coordinator can be any model** (Cursor, claude-omni, Claude, Codex, Hermes…): the steps below are the same whichever one you are.
 
-**Defaults:** the AGY model is `gemini-3.8-flash-high` (fast and reliable for scoped tasks). Only `gemini-*` models are allowed, never Claude/Opus/Sonnet or other non-Gemini models (step 4). When the reviewer approves, you close both sessions and **leave the worktree for the user to review**. Never open a PR, merge, or delete the worktree on your own; the user decides (step 8).
+**Defaults:** the AGY model is `gemini-4-hydrogen-high` (fastest reliable option for scoped tasks; fall back to `gemini-3.8-flash-high` when every profile is out of Hydrogen quota). Only `gemini-*` models are allowed, never Claude/Opus/Sonnet or other non-Gemini models (step 4). When the reviewer approves, you close both sessions and **leave the worktree for the user to review**. Never open a PR, merge, or delete the worktree on your own; the user decides (step 8).
 
 ## Never use these for AGY work
 
@@ -117,10 +117,10 @@ Launch AGY in the worktree's terminal. `-i` starts the interactive TUI and submi
 
 ```bash
 orca terminal send --terminal <handle> --enter \
-  --text 'agyp exec <profile> -- --dangerously-skip-permissions --model gemini-3.8-flash-high -i "Read <prompt-file> and follow every instruction in it."'
+  --text 'agyp exec <profile> -- --dangerously-skip-permissions --model gemini-4-hydrogen-high -i "Read <prompt-file> and follow every instruction in it."'
 ```
 
-Change the model only if the user asks; `agy models` lists the options. **Only Gemini models (`gemini-*`) are allowed**, for workers and reviewers alike. Never pass a Claude/Anthropic model (Claude, Opus, Sonnet, Haiku…) or any other non-Gemini model, even if `agy models` lists it or the user's wording is ambiguous; pick the closest `gemini-*` option instead.
+Change the model only if the user asks; `agy models` lists the options. Hydrogen has its own per-account limit that `agyp usage` does not show: when a session prints `Individual quota reached`, relaunch it on the next profile, and use `gemini-3.8-flash-high` once every profile is out of Hydrogen. **Only Gemini models (`gemini-*`) are allowed**, for workers and reviewers alike. Never pass a Claude/Anthropic model (Claude, Opus, Sonnet, Haiku…) or any other non-Gemini model, even if `agy models` lists it or the user's wording is ambiguous; pick the closest `gemini-*` option instead.
 
 ### 5. Answer the one-time trust prompt
 
@@ -195,7 +195,7 @@ Then print exactly one final line:
 orca terminal split --terminal <worker-handle> --direction vertical --json   # reviewer handle in the result (or: orca terminal list)
 orca terminal rename --terminal <reviewer-handle> --title "AGY <reviewer-profile> · review <slug>"
 orca terminal send --terminal <reviewer-handle> --enter \
-  --text 'agyp exec <reviewer-profile> -- --dangerously-skip-permissions --model gemini-3.8-flash-high -i "Read <review-prompt-file> and follow every instruction in it."'
+  --text 'agyp exec <reviewer-profile> -- --dangerously-skip-permissions --model gemini-4-hydrogen-high -i "Read <review-prompt-file> and follow every instruction in it."'
 ```
 
 A different profile asks the trust question again: answer it as in step 5. Then wait as in step 6, but for `REVIEW_APPROVED` or `REVIEW_CHANGES`.
