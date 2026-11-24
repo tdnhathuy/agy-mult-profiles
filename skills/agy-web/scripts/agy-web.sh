@@ -4,7 +4,7 @@
 # Usage: agy-web.sh <spec-file> [profile]
 #   spec-file  Task spec written from the agy-web template (absolute or relative path).
 #   profile    agyp profile; default $AGY_WEB_PROFILE, else the available profile with the most Gemini quota.
-# Env: AGY_WEB_MODEL (default gemini-3.8-flash-high).
+# Env: AGY_WEB_MODEL (default gemini-4-hydrogen-high).
 #
 # Run it from the checkout whose Orca browser tabs the task should use: orca browser commands
 # target the worktree of the current directory. Prints the worker's report; also saves it next
@@ -15,7 +15,7 @@ set -euo pipefail
 spec="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
 [[ "$spec" != *" "* ]] || { echo "Spec path must not contain spaces: $spec" >&2; exit 2; }
 profile="${2:-${AGY_WEB_PROFILE:-}}"
-model="${AGY_WEB_MODEL:-gemini-3.8-flash-high}"
+model="${AGY_WEB_MODEL:-gemini-4-hydrogen-high}"
 
 if [[ -z "$profile" ]]; then
   profile="$(agyp q --hide-gpt --json 2>/dev/null | python3 -c '
