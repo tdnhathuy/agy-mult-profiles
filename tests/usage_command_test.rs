@@ -7,6 +7,9 @@ mod commands;
 mod config;
 #[path = "../src/keychain.rs"]
 mod keychain;
+#[path = "../src/safety.rs"]
+#[allow(dead_code)]
+mod safety;
 #[path = "../src/security.rs"]
 mod security;
 

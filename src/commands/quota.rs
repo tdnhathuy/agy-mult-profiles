@@ -38,6 +38,8 @@ pub enum QuotaStatus {
     Unknown,
     Error,
     Unsupported,
+    /// Google disabled Antigravity on this account for a Terms of Service violation.
+    Suspended,
 }
 
 impl QuotaStatus {
@@ -49,6 +51,7 @@ impl QuotaStatus {
             QuotaStatus::Unknown => "unknown",
             QuotaStatus::Error => "error",
             QuotaStatus::Unsupported => "unsupported",
+            QuotaStatus::Suspended => "suspended",
         }
     }
 }
@@ -322,6 +325,13 @@ pub fn classify_probe_outcome(
         return (QuotaStatus::Error, Some("Probe timed out".to_string()));
     }
 
+    if stderr.lines().any(crate::safety::is_tos_suspension_text) {
+        return (
+            QuotaStatus::Suspended,
+            Some("Service disabled for violation of Terms of Service".to_string()),
+        );
+    }
+
     let has_quota = stderr.lines().any(is_quota_exhausted_line);
     let has_auth = stderr.lines().any(is_unauthenticated_line);
 
@@ -383,7 +393,7 @@ pub fn calculate_quota_exit_code(statuses: &[QuotaStatus]) -> i32 {
     let has_quota_or_unauth = statuses.iter().any(|s| {
         matches!(
             s,
-            QuotaStatus::QuotaExhausted | QuotaStatus::Unauthenticated
+            QuotaStatus::QuotaExhausted | QuotaStatus::Unauthenticated | QuotaStatus::Suspended
         )
     });
     if has_quota_or_unauth {
@@ -638,6 +648,24 @@ pub fn execute_quota_impl<B: KeychainBackend + Clone, R: QuotaProbeRunner>(
             break;
         }
 
+        // A suspended account is never probed again: every probe is a request Google sees.
+        if let Some(record) =
+            crate::safety::read_suspension(&ProfileRegistry::get_profiles_dir(), &profile.name)
+        {
+            results.push(serde_json::json!({
+                "profile": profile.name,
+                "email": email_opt,
+                "status": QuotaStatus::Suspended.as_str(),
+                "observed_at": if record.detected_at.is_empty() { Utc::now().to_rfc3339() } else { record.detected_at.clone() },
+                "cached": false,
+                "source": "preflight",
+                "detail": format!("Marked suspended; appeal, then run `agyp unsuspend {}`.", profile.name),
+                "agent_exit_code": null,
+            }));
+            statuses.push(QuotaStatus::Suspended);
+            continue;
+        }
+
         // Check cache if --no-cache is not requested
         if !no_cache {
             if let Some(cached_entry) = cache.entries.get(&profile.name) {
@@ -838,6 +866,14 @@ pub fn execute_quota_impl<B: KeychainBackend + Clone, R: QuotaProbeRunner>(
 
                 let (status, detail) =
                     classify_probe_outcome(is_timed_out, exit_code, &stdout_str, &stderr_str);
+                if status == QuotaStatus::Suspended {
+                    crate::safety::record_if_suspended(
+                        &ProfileRegistry::get_profiles_dir(),
+                        &profile.name,
+                        "quota",
+                        &stderr_str,
+                    );
+                }
 
                 let item = serde_json::json!({
                     "profile": profile.name,
@@ -1005,9 +1041,9 @@ pub fn cmd_quota(
     // Human-readable quota is the authoritative /usage report. --json keeps the
     // probe contract used by agents. --timeout and --no-cache only apply there.
     if !json {
-        let _ = (timeout, no_cache);
+        let _ = timeout;
         let profile = if all { None } else { profile };
-        return crate::commands::usage::cmd_usage(profile, false, !hide_gpt);
+        return crate::commands::usage::cmd_usage(profile, false, !hide_gpt, no_cache);
     }
     let (code, json_doc) = execute_quota_impl(
         profile,

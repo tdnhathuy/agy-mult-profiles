@@ -5,7 +5,19 @@ description: Use when the user gives a requirement to be planned and delegated t
 
 # agyp: delegate coding to AGY across many accounts
 
-`agyp` runs the Antigravity CLI (`agy`) under one of several Google accounts ("profiles"). Each profile has its own isolated credential store (a private HOME and Keychain on macOS, a private token file on Linux), so many AGY sessions run in parallel on different accounts. More profiles = more Gemini quota.
+`agyp` runs the Antigravity CLI (`agy`) under one of several Google accounts ("profiles"). Each profile has its own isolated credential store (a private HOME and Keychain on macOS, a private token file on Linux), so AGY sessions can run in parallel on different accounts.
+
+## Account safety (read first)
+
+Using several Google accounts from one machine is a grey area under the Antigravity terms, and Google suspends accounts without warning (`403 ... disabled in this account for violation of Terms of Service`). Bursty, parallel, round-the-clock use and instant account hopping on quota errors are the patterns that get flagged. So:
+
+- **agyp throttles for you.** At most 4 agyp-launched AGY sessions run at once (`AGYP_MAX_CONCURRENT`), and launches on any profile are spaced 15 s + 0–10 s random (`AGYP_LAUNCH_GAP_SECS`, `AGYP_LAUNCH_JITTER_SECS`). A launch that prints `waits for one to finish` or `pacing AGY launches` is working as intended: wait, do not kill or retry it. Never raise these limits unless the user asks.
+- **Run at most 2 tasks in parallel** (each needs a worker and later a reviewer session). Queue the rest.
+- **Do not hop accounts on quota errors.** On `Individual quota reached` or `429`, follow "Quota exhausted" below; never relaunch the same task on another profile right away.
+- **Do not poll quota.** `agyp q` is cached for 3 minutes; run it only at step 1 and at the reviewer pick, never in a loop.
+- **On a suspension, stop everything** (see "Account suspended"). agyp marks the profile and refuses to run it; do not try the next profile.
+- Use only the official `agy` through `agyp`. Never feed an AGY/Antigravity token to another tool, proxy or extension.
+- Tell the user (once, if they are adding profiles) not to use their main personal or work Google account as a profile.
 
 **You are the coordinator.** AGY only edits files in its worktree. You pick the profiles, write the prompt, relay between sessions, and do the final check. Code review is done by a second AGY session, not by you: this saves your tokens.
 
@@ -49,13 +61,13 @@ There is no plan file in the repo: the prompt files in `$TMPDIR` are the plan, a
 ### 1. Pick profiles
 
 ```bash
-agyp q --hide-gpt --json    # Gemini quota per profile, ~6s per profile
+agyp q --hide-gpt --json    # Gemini quota per profile, ~6s per profile (cached 3 min)
 ```
 
 Each `results[]` entry has `profile`, `email`, `status`, and `gemini.five_hour.remaining_percent` / `gemini.five_day.remaining_percent`.
 
 - Rank `available` profiles by the **lower** of their two Gemini percentages and pick the highest.
-- Skip any profile where either window is 0.
+- Skip any profile where either window is 0, and any entry whose `status` is not `success` because it is marked suspended (its `error` says `Suspended by Google`).
 - If **every** profile is skipped (AGY exhausted), load the `claude-worker` skill and give the tasks without a profile to Claude Sonnet 5.5 instead, without asking the user. A failed quota check is not exhaustion (next bullet).
 - Give each parallel task a **different** worker profile.
 - Pick the reviewer profile at step 7, when the worker finishes (quota and free profiles may have changed by then).
@@ -65,7 +77,7 @@ Each `results[]` entry has `profile`, `email`, `status`, and `gemini.five_hour.r
 
 ```bash
 orca repo list --json      # repo id (path: selectors fail on symlinked repo paths)
-orca worktree list --json  # stale agy-* worktrees? ask the user before adding more; keep ≤ 5 open
+orca worktree list --json  # stale agy-* worktrees? ask the user before adding more; keep ≤ 5 open, ≤ 2 running
 orca worktree create --repo id:<repo-id> --name agy-<slug> \
   --comment "AGY <profile>: <one-line task summary>" --json
 ```
@@ -120,7 +132,7 @@ orca terminal send --terminal <handle> --enter \
   --text 'agyp exec <profile> -- --dangerously-skip-permissions --model gemini-4-hydrogen-high -i "Read <prompt-file> and follow every instruction in it."'
 ```
 
-Change the model only if the user asks; `agy models` lists the options. Hydrogen has its own per-account limit that `agyp usage` does not show: when a session prints `Individual quota reached`, relaunch it on the next profile, and use `gemini-3.8-flash-high` once every profile is out of Hydrogen. **Only Gemini models (`gemini-*`) are allowed**, for workers and reviewers alike. Never pass a Claude/Anthropic model (Claude, Opus, Sonnet, Haiku…) or any other non-Gemini model, even if `agy models` lists it or the user's wording is ambiguous; pick the closest `gemini-*` option instead.
+Change the model only if the user asks; `agy models` lists the options. Hydrogen has its own per-account limit that `agyp usage` does not show: when a session prints `Individual quota reached`, relaunch it on the **same** profile with `gemini-3.8-flash-high` (Flash has its own limit). If Flash is also out, follow "Quota exhausted"; do not move the task to another account. **Only Gemini models (`gemini-*`) are allowed**, for workers and reviewers alike. Never pass a Claude/Anthropic model (Claude, Opus, Sonnet, Haiku…) or any other non-Gemini model, even if `agy models` lists it or the user's wording is ambiguous; pick the closest `gemini-*` option instead.
 
 ### 5. Answer the one-time trust prompt
 
@@ -159,6 +171,7 @@ orca terminal read --terminal <handle> --screen
 | A question or approval prompt | Answer only if it concerns this worktree and the task; otherwise ask the user |
 | `429`, `RESOURCE_EXHAUSTED`, or a quota message | See "Quota exhausted" |
 | Login or auth error | Ask the user to run `agyp login <profile>` in their own terminal |
+| `403`, `violation of Terms of Service`, or `service has been disabled` | See "Account suspended" |
 
 To send a follow-up instruction to the same session: `orca terminal send --terminal <handle> --text "<one line>" --enter`.
 
@@ -228,6 +241,15 @@ The reviewer's approval is a claim, not proof. Check cheaply:
 
 Keep the task on its profile and inspect `git -C <worktree> status`. If every other profile is also exhausted, hand the task to Claude Sonnet 5.5 with the `claude-worker` skill's takeover prompt. Otherwise report the blocker to the user. Moving the same task to another profile requires the user's explicit OK, because the first run's partial edits are still in the worktree. Choosing a different profile for a *new* task is always fine.
 
+## Account suspended
+
+Google disabled Antigravity on that account. Retrying, or moving the work to the other profiles on this machine, is what turns one suspension into several.
+
+1. Run `agyp suspend <profile>` (agyp already does this when it sees the message in `task`, `prompt --json`, `quota` or `usage`; an interactive `exec` session needs it by hand). agyp then refuses that profile with exit code `3`.
+2. Close **every** running AGY session on **every** profile (`orca terminal close`), and start no new AGY session.
+3. Hand the unfinished tasks to Claude with the `claude-worker` skill's takeover prompt.
+4. Tell the user: which profile, the message, and that they must appeal in Antigravity and run `agyp unsuspend <profile>` once it is restored. Resume AGY work only when the user says so.
+
 ## Other commands
 
 ```bash
@@ -235,6 +257,8 @@ agyp list --json                    # profiles and emails
 agyp q [<profile>]                  # human-readable quota with reset times
 agyp alias set p1 profile-1         # short names; work anywhere a profile is accepted
 agyp login <profile>                # user only: interactive Google OAuth in a browser
+agyp suspend <profile>              # stop agyp from running an account Google suspended
+agyp unsuspend <profile>            # user only: after the appeal is approved
 ```
 
 Never read, print, or copy files under `~/.gemini-profiles/` (they hold credentials).

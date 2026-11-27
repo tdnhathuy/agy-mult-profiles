@@ -20,9 +20,10 @@ Both are built for **developers and AI agents** (Claude Code, Codex, Hermes, Orc
 - **Agent-friendly output.**
   - Clean stdout with no wrapper noise.
   - `--json` on the commands agents care about.
-  - Stable exit codes: `0` success, `1` not found / invalid input, `2` unauthenticated, `127` `agy` binary missing.
+  - Stable exit codes: `0` success, `1` not found / invalid input, `2` unauthenticated, `3` account suspended by Google, `127` `agy` binary missing.
   - `agyp task` / `codexp task` run in a Git linked worktree with a hard timeout, concurrent stream draining and a structured failure classification.
 - **Safe defaults.** AGY permission prompts stay on unless you pass `--skip-permissions` (only allowed inside a worktree). Profiles are never rotated automatically on `429` / quota errors.
+- **Account-safety guards.** A cap on concurrent AGY sessions, paced launches with random jitter, cached quota checks, and a hard stop on accounts Google suspends (see [Account safety](#account-safety)).
 - **Quota at a glance.** `agyp q` and `codexp q` show the remaining Gemini / GPT / Codex quota for every profile.
 - **One login switch, one history.** `codexp active <profile>` makes plain `codex` (and the IDE extension / Codex app) use a codexp profile, and plain `codex` and every profile share one session history in `~/.codex`, so any thread resumes under any account.
 - **Aliases.** Map short handles such as `p1` or `work` to profiles.
@@ -135,8 +136,30 @@ agyp task --profile p1 --worktree ../wt-fix --prompt-file prompt.md --timeout 30
 | `agyp exec <profile> [-- <args...>]` | Pass arbitrary arguments to `agy` under a profile |
 | `agyp q [profile]` / `agyp usage [profile]` | Gemini and GPT quota: remaining %, usage bar, time until reset. `--json`, `--hide-gpt` |
 | `agyp quota --profile <p>` / `--all` | Same quota view; with `--json` it runs a minimal health probe (cached 5 min, `--no-cache`, `--timeout`) |
+| `agyp suspend <profile>` | Mark a profile as suspended by Google; agyp refuses to run it (exit code `3`) |
+| `agyp unsuspend <profile>` | Clear the mark after Google restored the account |
 
 Use `agyp task` for coding work. `agyp prompt` has no worktree isolation, deadline or failure classification, so keep it for non-coding prompts.
+
+`agyp q` / `agyp usage` reuse a result younger than 3 minutes (`--no-cache` asks every profile again).
+
+---
+
+## Account safety
+
+Running several Google accounts from one machine is a grey area under the Antigravity terms, and Google suspends accounts without warning (`403 ... This service has been disabled in this account for violation of Terms of Service`). There is no official statement on multi-account use. agyp only ever runs the official `agy` binary (no proxy, no token reuse in other clients), and it adds guards that keep traffic closer to one person working by hand:
+
+| Guard | Default | Setting |
+| :--- | :--- | :--- |
+| Concurrent AGY sessions started by `agyp exec` / `prompt` / `task`, across all profiles | 4 (extra launches wait) | `AGYP_MAX_CONCURRENT` (`0` = no cap) |
+| Gap between two launches on any profile | 15 s | `AGYP_LAUNCH_GAP_SECS` |
+| Random extra delay per launch | 0–10 s | `AGYP_LAUNCH_JITTER_SECS` |
+| Reuse of `agyp q` / `usage` results | 3 min | `--no-cache` |
+| Suspended account | refused, exit code `3` | `agyp suspend` / `agyp unsuspend` |
+
+- When `agy` prints the Terms of Service message during `task`, `prompt --json`, `quota` or `usage`, agyp records the profile under `~/.gemini-profiles/suspended/` and refuses to run it until you appeal and run `agyp unsuspend <profile>`. An interactive `agyp exec` session cannot be read by agyp, so run `agyp suspend <profile>` yourself if you see the message there. Every launch on another profile then prints a warning: Google may link the accounts used from this machine, so pause AGY work until the appeal is decided.
+- `agyp list` shows `suspended` in the STATUS column, and `agyp list --json` has a `suspended` array.
+- Habits that lower the risk: do not use your main personal or work Google account as a profile; on quota errors wait for the reset or fall back to a smaller model on the same account instead of hopping accounts; keep parallel work small; never use quota-monitor extensions or third-party tools with Antigravity tokens.
 
 ---
 
@@ -245,6 +268,8 @@ You have access to `agyp` (Antigravity Multi-Profile CLI).
 5. Exit code 2 means the profile is unauthenticated: ask the user to run `agyp login <profile>`.
 6. On 429 / resource exhausted, keep the profile pinned, inspect the worktree, and report.
    Never switch profiles automatically.
+7. Exit code 3 / `account_suspended` means Google suspended the account: stop every AGY run
+   on every profile and tell the user. Do not move the work to another profile.
 ```
 
 ---

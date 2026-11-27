@@ -2,7 +2,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, FixedOffset, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::agy::{locate_agy_binary, run_command_captured_interruptibly_with_timeout};
 use crate::config::ProfileRegistry;
@@ -14,6 +14,78 @@ pub const DEFAULT_USAGE_TIMEOUT: Duration = Duration::from_secs(60);
 const LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 const RESTORE_EMERGENCY_TIMEOUT: Duration = Duration::from_secs(5);
 const VIETNAM_UTC_OFFSET_SECONDS: i32 = 7 * 60 * 60;
+/// `agyp q` results are reused for this long. Every check runs `agy` against Google once per
+/// profile, and a tight polling loop across many accounts looks like a quota monitor.
+pub const USAGE_CACHE_TTL: Duration = Duration::from_secs(3 * 60);
+pub const USAGE_CACHE_FILENAME: &str = "usage-cache.json";
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UsageCache {
+    pub entries: std::collections::HashMap<String, UsageCacheEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageCacheEntry {
+    pub observed_at: DateTime<Utc>,
+    /// Raw `/usage` output; reset times in it are absolute, so it stays correct when reused.
+    pub raw: String,
+}
+
+impl UsageCache {
+    /// The cached raw report for `profile` when it is younger than `ttl` at `now`.
+    pub fn fresh_raw(&self, profile: &str, now: DateTime<Utc>, ttl: Duration) -> Option<&str> {
+        let entry = self.entries.get(profile)?;
+        let age = now.signed_duration_since(entry.observed_at);
+        let ttl = chrono::Duration::from_std(ttl).ok()?;
+        (age >= chrono::Duration::zero() && age < ttl).then_some(entry.raw.as_str())
+    }
+}
+
+fn usage_cache_path() -> std::path::PathBuf {
+    ProfileRegistry::get_profiles_dir().join(USAGE_CACHE_FILENAME)
+}
+
+fn load_usage_cache(path: &std::path::Path) -> UsageCache {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn store_usage_cache_entry(profile: &str, raw: &str) {
+    use fs2::FileExt;
+    let path = usage_cache_path();
+    let Some(parent) = path.parent() else { return };
+    if std::fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let Ok(lock) = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path.with_extension("lock"))
+    else {
+        return;
+    };
+    if lock.lock_exclusive().is_err() {
+        return;
+    }
+    let mut cache = load_usage_cache(&path);
+    cache.entries.insert(
+        profile.to_string(),
+        UsageCacheEntry {
+            observed_at: Utc::now(),
+            raw: raw.to_string(),
+        },
+    );
+    if let Ok(body) = serde_json::to_string_pretty(&cache) {
+        let tmp = path.with_extension("json.tmp");
+        if crate::security::write_private_file(&tmp, body.as_bytes()).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+    let _ = FileExt::unlock(&lock);
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct UsageWindow {
@@ -449,12 +521,27 @@ fn run_usage_for_profile(
     profile_name: &str,
     registry: &ProfileRegistry,
     agy_binary: &std::path::Path,
+    no_cache: bool,
 ) -> Result<(String, String, GeminiUsage), String> {
     let profile = registry
         .resolve_profile(profile_name)
         .ok_or_else(|| format!("Profile or alias '{profile_name}' not found."))?;
     let canonical = profile.name.clone();
     let email = profile.email.clone();
+    let profiles_dir = ProfileRegistry::get_profiles_dir();
+    if crate::safety::read_suspension(&profiles_dir, &canonical).is_some() {
+        return Err(format!(
+            "Suspended by Google (Terms of Service); not checked. Appeal, then run `agyp unsuspend {canonical}`."
+        ));
+    }
+    if !no_cache {
+        let cache = load_usage_cache(&usage_cache_path());
+        if let Some(raw) = cache.fresh_raw(&canonical, Utc::now(), USAGE_CACHE_TTL) {
+            if let Ok(usage) = parse_gemini_usage(raw) {
+                return Ok((canonical, email, usage));
+            }
+        }
+    }
     let profiles_root = ProfileRegistry::get_profiles_dir().join("profiles");
     let validated_profile_dir = validate_profile_dir_under(&profile.dir, &profiles_root)?;
     // Acquiring the profile lock re-arms the signal handlers; honor an earlier interrupt first.
@@ -492,6 +579,14 @@ fn run_usage_for_profile(
         return Err("Usage check timed out.".to_string());
     }
     let code = output.status.and_then(|status| status.code());
+    if crate::safety::record_if_suspended(
+        &profiles_dir,
+        &canonical,
+        "usage",
+        &String::from_utf8_lossy(&output.stderr),
+    ) {
+        return Err("Suspended by Google (Terms of Service).".to_string());
+    }
     if code != Some(0) {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if stderr.to_ascii_lowercase().contains("authentication") {
@@ -511,10 +606,14 @@ fn run_usage_for_profile(
     let stdout = String::from_utf8(output.stdout)
         .map_err(|_| "AGY usage output is not valid UTF-8.".to_string())?;
     let usage = parse_gemini_usage(&stdout)?;
+    store_usage_cache_entry(&canonical, &stdout);
     Ok((canonical, email, usage))
 }
 
-fn execute_usage(profile_name: Option<&str>) -> Result<Vec<ProfileUsageResult>, String> {
+fn execute_usage(
+    profile_name: Option<&str>,
+    no_cache: bool,
+) -> Result<Vec<ProfileUsageResult>, String> {
     let config_path = ProfileRegistry::get_config_file_path();
     let registry = ProfileRegistry::load_or_default(&config_path)?;
     let agy_binary = locate_agy_binary()?;
@@ -533,7 +632,7 @@ fn execute_usage(profile_name: Option<&str>) -> Result<Vec<ProfileUsageResult>, 
     Ok(names
         .iter()
         .map(
-            |name| match run_usage_for_profile(name, &registry, &agy_binary) {
+            |name| match run_usage_for_profile(name, &registry, &agy_binary, no_cache) {
                 Ok((profile, email, usage)) => ProfileUsageResult::Success {
                     profile,
                     email,
@@ -552,8 +651,13 @@ fn execute_usage(profile_name: Option<&str>) -> Result<Vec<ProfileUsageResult>, 
         .collect())
 }
 
-pub fn cmd_usage(profile: Option<&str>, json: bool, show_gpt: bool) -> Result<(), i32> {
-    let results = match execute_usage(profile) {
+pub fn cmd_usage(
+    profile: Option<&str>,
+    json: bool,
+    show_gpt: bool,
+    no_cache: bool,
+) -> Result<(), i32> {
+    let results = match execute_usage(profile, no_cache) {
         Ok(results) => results,
         Err(error) => {
             if json {

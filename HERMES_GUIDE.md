@@ -99,9 +99,15 @@ Use `agyp` to execute AGY prompts through one explicitly selected Google account
   - `setup_error`: Process lock acquisition, initialization, or Keychain restoration failure.
   - `invalid_duration`: Malformed `--timeout` string.
   - `invalid_prompt`: Empty prompt supplied.
+  - `account_suspended`: Google disabled Antigravity on the account for a Terms of Service violation (exit code 3). agyp marks the profile and refuses to run it until the user runs `agyp unsuspend <profile>`.
 
 #### Rate Limiting Policy:
 If the selected profile encounters `RESOURCE_EXHAUSTED` / `429`, keep the same profile, inspect worktree state before any retry, and report the blocker. Never switch accounts automatically.
+
+#### Account Safety Policy:
+- agyp caps concurrent AGY sessions (default 4, `AGYP_MAX_CONCURRENT`) and spaces launches (15 s + 0-10 s jitter). Messages such as `waits for one to finish` or `pacing AGY launches` are expected: wait, do not kill or retry.
+- `agyp q` / `agyp usage` results are cached for 3 minutes (`--no-cache` to bypass). Do not poll quota in a loop.
+- On `account_suspended` (exit code 3) or any `violation of Terms of Service` message: stop every AGY run on every profile and report to the user. Do not move work to another profile.
 ```
 
 ---

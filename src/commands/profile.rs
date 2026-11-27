@@ -280,10 +280,16 @@ pub fn cmd_list(json_output: bool) -> Result<(), i32> {
     })?;
 
     if json_output {
+        let suspended: Vec<String> =
+            crate::safety::list_suspensions(&ProfileRegistry::get_profiles_dir())
+                .into_iter()
+                .map(|r| r.profile)
+                .collect();
         let val = json!({
             "default_profile": reg.default_profile,
             "profiles": reg.profiles,
             "aliases": reg.aliases,
+            "suspended": suspended,
         });
         println!("{}", serde_json::to_string_pretty(&val).unwrap());
         return Ok(());
@@ -317,11 +323,15 @@ pub fn cmd_list(json_output: bool) -> Result<(), i32> {
         } else {
             "no"
         };
-        let auth_status = if check_profile_auth(&info.dir) {
-            "ready"
-        } else {
-            "unauthenticated"
-        };
+        let auth_status =
+            if crate::safety::read_suspension(&ProfileRegistry::get_profiles_dir(), name).is_some()
+            {
+                "suspended"
+            } else if check_profile_auth(&info.dir) {
+                "ready"
+            } else {
+                "unauthenticated"
+            };
 
         println!(
             "{:<15} {:<30} {:<15} {:<10} {:<15}",
@@ -436,5 +446,43 @@ pub fn cmd_rm(name: &str, yes: bool) -> Result<(), i32> {
     )?;
 
     println!("Profile '{}' deleted.", profile.name);
+    Ok(())
+}
+
+/// `agyp suspend <profile>` / `agyp unsuspend <profile>`.
+pub fn cmd_suspend(profile_arg: &str, suspend: bool) -> Result<(), i32> {
+    let config_path = ProfileRegistry::get_config_file_path();
+    let reg = ProfileRegistry::load_or_default(&config_path).map_err(|e| {
+        eprintln!("Error: {}", e);
+        1
+    })?;
+    let profile = reg.resolve_profile(profile_arg).ok_or_else(|| {
+        eprintln!("Error: Profile or alias '{}' not found.", profile_arg);
+        1
+    })?;
+    let profiles_dir = ProfileRegistry::get_profiles_dir();
+    if suspend {
+        crate::safety::mark_suspended(&profiles_dir, &profile.name, "manual", None).map_err(
+            |e| {
+                eprintln!("Error: {e}");
+                1
+            },
+        )?;
+        println!(
+            "Profile '{}' marked suspended. agyp will not run it until `agyp unsuspend {}`.",
+            profile.name, profile.name
+        );
+    } else {
+        let removed =
+            crate::safety::clear_suspension(&profiles_dir, &profile.name).map_err(|e| {
+                eprintln!("Error: {e}");
+                1
+            })?;
+        if removed {
+            println!("Profile '{}' is no longer marked suspended.", profile.name);
+        } else {
+            println!("Profile '{}' was not marked suspended.", profile.name);
+        }
+    }
     Ok(())
 }

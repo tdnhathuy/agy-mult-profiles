@@ -25,6 +25,9 @@ pub fn cmd_exec(profile_arg: &str, raw_args: &[String]) -> Result<(), i32> {
         127
     })?;
 
+    // Suspension check, concurrency cap and launch pacing, held for the whole session.
+    let _launch_permit = crate::safety::guard_launch(&profile.name)?;
+
     let lock_path =
         crate::security::profile_lock_path(&ProfileRegistry::get_profiles_dir(), &profile.name);
     let process_lock = crate::security::ProcessLock::acquire_announcing(&lock_path, || {

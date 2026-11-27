@@ -27,6 +27,8 @@ pub enum TaskFailureKind {
     InvalidPrompt,
     InvalidDuration,
     SetupError,
+    /// Google disabled Antigravity on this account for a Terms of Service violation.
+    AccountSuspended,
 }
 
 impl TaskFailureKind {
@@ -43,6 +45,7 @@ impl TaskFailureKind {
             TaskFailureKind::InvalidPrompt => "invalid_prompt",
             TaskFailureKind::InvalidDuration => "invalid_duration",
             TaskFailureKind::SetupError => "setup_error",
+            TaskFailureKind::AccountSuspended => "account_suspended",
         }
     }
 }
@@ -448,6 +451,11 @@ pub fn classify_task_outcome(
 ) -> Result<(), TaskFailureKind> {
     if timed_out {
         return Err(TaskFailureKind::Timeout);
+    }
+
+    // A ToS suspension outranks everything else: the account must stop, not retry.
+    if stderr.lines().any(crate::safety::is_tos_suspension_text) {
+        return Err(TaskFailureKind::AccountSuspended);
     }
 
     // Finding 3: Classify quota/permission ONLY from original child stderr
@@ -1115,6 +1123,7 @@ fn execute_task_impl<B: crate::keychain::KeychainBackend>(
     } else {
         match failure_kind {
             Some(TaskFailureKind::Unauthenticated) => 2,
+            Some(TaskFailureKind::AccountSuspended) => crate::safety::SUSPENDED_EXIT_CODE,
             Some(TaskFailureKind::SetupError) => 1,
             _ => agent_exit_code.filter(|&c| c != 0).unwrap_or(1),
         }
@@ -1185,10 +1194,29 @@ fn print_task_output(
                     )
                 }
                 TaskFailureKind::SetupError => "Setup or keychain restore error".to_string(),
+                TaskFailureKind::AccountSuspended => crate::safety::suspension_notice(&res.profile),
                 _ => kind.as_str().to_string(),
             };
             eprintln!("Error [{}]: {}", kind.as_str(), msg);
         }
+    }
+}
+
+fn failure_kind_from_str(kind: &str) -> Option<TaskFailureKind> {
+    match kind {
+        "timeout" => Some(TaskFailureKind::Timeout),
+        "empty_output" => Some(TaskFailureKind::EmptyOutput),
+        "quota_exhausted" => Some(TaskFailureKind::QuotaExhausted),
+        "permission_denied" => Some(TaskFailureKind::PermissionDenied),
+        "agent_failed" => Some(TaskFailureKind::AgentFailed),
+        "setup_error" => Some(TaskFailureKind::SetupError),
+        "invalid_worktree" => Some(TaskFailureKind::InvalidWorktree),
+        "invalid_profile" => Some(TaskFailureKind::InvalidProfile),
+        "unauthenticated" => Some(TaskFailureKind::Unauthenticated),
+        "invalid_prompt" => Some(TaskFailureKind::InvalidPrompt),
+        "invalid_duration" => Some(TaskFailureKind::InvalidDuration),
+        "account_suspended" => Some(TaskFailureKind::AccountSuspended),
+        _ => None,
     }
 }
 
@@ -1202,6 +1230,41 @@ pub fn cmd_task(
     skip_permissions: bool,
     json_output: bool,
 ) -> Result<(), i32> {
+    // Suspension check, concurrency cap and launch pacing, held for the whole task. An unknown
+    // profile skips the guard here and gets its normal invalid_profile error below.
+    let profiles_dir = ProfileRegistry::get_profiles_dir();
+    let canonical_profile =
+        ProfileRegistry::load_or_default(&ProfileRegistry::get_config_file_path())
+            .ok()
+            .and_then(|reg| reg.resolve_profile(profile_name).map(|p| p.name.clone()));
+    let _launch_permit = match canonical_profile.as_deref() {
+        Some(name) => match crate::safety::acquire_launch_permit(
+            &profiles_dir,
+            name,
+            &crate::safety::SafetySettings::from_env(),
+        ) {
+            Ok(permit) => Some(permit),
+            Err(e) => {
+                let kind = match e {
+                    crate::safety::LaunchError::Suspended(_) => TaskFailureKind::AccountSuspended,
+                    crate::safety::LaunchError::Io(_) => TaskFailureKind::SetupError,
+                };
+                let (code, output) = make_setup_error_output(
+                    name,
+                    &worktree_path.display().to_string(),
+                    None,
+                    kind,
+                    &e.message(),
+                    e.exit_code(),
+                    std::time::Instant::now(),
+                );
+                print_task_output(&output, json_output, Some(kind));
+                return code;
+            }
+        },
+        None => None,
+    };
+
     let (code, output) = execute_task_impl(
         profile_name,
         worktree_path,
@@ -1211,20 +1274,22 @@ pub fn cmd_task(
         skip_permissions,
         crate::keychain::SystemKeychainBackend,
     );
-    let fk = output.failure_kind.as_deref().and_then(|k| match k {
-        "timeout" => Some(TaskFailureKind::Timeout),
-        "empty_output" => Some(TaskFailureKind::EmptyOutput),
-        "quota_exhausted" => Some(TaskFailureKind::QuotaExhausted),
-        "permission_denied" => Some(TaskFailureKind::PermissionDenied),
-        "agent_failed" => Some(TaskFailureKind::AgentFailed),
-        "setup_error" => Some(TaskFailureKind::SetupError),
-        "invalid_worktree" => Some(TaskFailureKind::InvalidWorktree),
-        "invalid_profile" => Some(TaskFailureKind::InvalidProfile),
-        "unauthenticated" => Some(TaskFailureKind::Unauthenticated),
-        "invalid_prompt" => Some(TaskFailureKind::InvalidPrompt),
-        "invalid_duration" => Some(TaskFailureKind::InvalidDuration),
-        _ => None,
-    });
+    if output.failure_kind.as_deref() == Some("account_suspended") {
+        let _ = crate::safety::mark_suspended(
+            &profiles_dir,
+            &output.profile,
+            "task",
+            output
+                .stderr
+                .lines()
+                .find(|line| crate::safety::is_tos_suspension_text(line))
+                .map(str::trim),
+        );
+    }
+    let fk = output
+        .failure_kind
+        .as_deref()
+        .and_then(failure_kind_from_str);
     print_task_output(&output, json_output, fk);
     code
 }
@@ -1250,20 +1315,10 @@ pub fn cmd_task_with_backend<B: crate::keychain::KeychainBackend>(
         skip_permissions,
         backend,
     );
-    let fk = output.failure_kind.as_deref().and_then(|k| match k {
-        "timeout" => Some(TaskFailureKind::Timeout),
-        "empty_output" => Some(TaskFailureKind::EmptyOutput),
-        "quota_exhausted" => Some(TaskFailureKind::QuotaExhausted),
-        "permission_denied" => Some(TaskFailureKind::PermissionDenied),
-        "agent_failed" => Some(TaskFailureKind::AgentFailed),
-        "setup_error" => Some(TaskFailureKind::SetupError),
-        "invalid_worktree" => Some(TaskFailureKind::InvalidWorktree),
-        "invalid_profile" => Some(TaskFailureKind::InvalidProfile),
-        "unauthenticated" => Some(TaskFailureKind::Unauthenticated),
-        "invalid_prompt" => Some(TaskFailureKind::InvalidPrompt),
-        "invalid_duration" => Some(TaskFailureKind::InvalidDuration),
-        _ => None,
-    });
+    let fk = output
+        .failure_kind
+        .as_deref()
+        .and_then(failure_kind_from_str);
     print_task_output(&output, json_output, fk);
     code
 }

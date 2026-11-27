@@ -153,6 +153,29 @@ pub fn cmd_prompt(
         }
     };
 
+    // Suspension check, concurrency cap and launch pacing, held for the whole run.
+    let profiles_dir = ProfileRegistry::get_profiles_dir();
+    let _launch_permit = match crate::safety::acquire_launch_permit(
+        &profiles_dir,
+        &profile.name,
+        &crate::safety::SafetySettings::from_env(),
+    ) {
+        Ok(permit) => permit,
+        Err(e) => {
+            if json_output {
+                print_json_error(
+                    &profile.name,
+                    profile_email_opt(&profile.email),
+                    e.exit_code(),
+                    &e.message(),
+                );
+            } else {
+                eprintln!("Error: {}", e.message());
+            }
+            return Err(e.exit_code());
+        }
+    };
+
     let lock_path =
         crate::security::profile_lock_path(&ProfileRegistry::get_profiles_dir(), &profile.name);
     let process_lock = crate::security::ProcessLock::acquire_announcing(&lock_path, || {
@@ -218,6 +241,21 @@ pub fn cmd_prompt(
 
         let restore_result = keychain_guard.sync_and_restore();
         let restore_ok = restore_result.is_ok();
+        if crate::safety::record_if_suspended(
+            &profiles_dir,
+            &profile.name,
+            "prompt",
+            &format!("{stderr}\n{stdout}"),
+        ) {
+            let err_msg = crate::safety::suspension_notice(&profile.name);
+            print_json_error(
+                &profile.name,
+                profile_email_opt(&profile.email),
+                crate::safety::SUSPENDED_EXIT_CODE,
+                &err_msg,
+            );
+            return Err(crate::safety::SUSPENDED_EXIT_CODE);
+        }
         let result = json!({
             "profile": profile.name,
             "email": profile.email,

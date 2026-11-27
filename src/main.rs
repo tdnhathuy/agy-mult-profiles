@@ -2,6 +2,8 @@ mod agy;
 mod commands;
 mod config;
 pub mod keychain;
+#[allow(dead_code)]
+mod safety;
 mod security;
 
 use clap::{Parser, Subcommand};
@@ -137,6 +139,20 @@ enum Commands {
         /// Hide the GPT quota section
         #[arg(long)]
         hide_gpt: bool,
+        /// Ignore results cached in the last 3 minutes and ask every profile again
+        #[arg(long)]
+        no_cache: bool,
+    },
+    /// Mark a profile as suspended by Google so agyp stops running it (use when you see the
+    /// "violation of Terms of Service" message in an interactive `agyp exec` session)
+    Suspend {
+        /// Profile name or alias
+        profile: String,
+    },
+    /// Clear a suspension mark after Google restored the account (appeal approved)
+    Unsuspend {
+        /// Profile name or alias
+        profile: String,
     },
     /// Show version or ping
     Ping,
@@ -373,7 +389,10 @@ fn main() {
             profile,
             json,
             hide_gpt,
-        }) => commands::usage::cmd_usage(profile.as_deref(), *json, !*hide_gpt),
+            no_cache,
+        }) => commands::usage::cmd_usage(profile.as_deref(), *json, !*hide_gpt, *no_cache),
+        Some(Commands::Suspend { profile }) => commands::profile::cmd_suspend(profile, true),
+        Some(Commands::Unsuspend { profile }) => commands::profile::cmd_suspend(profile, false),
         Some(Commands::Ping) => {
             println!("pong");
             Ok(())

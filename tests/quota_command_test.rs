@@ -14,6 +14,9 @@ mod commands;
 mod config;
 #[path = "../src/keychain.rs"]
 mod keychain;
+#[path = "../src/safety.rs"]
+#[allow(dead_code)]
+mod safety;
 #[path = "../src/security.rs"]
 mod security;
 
@@ -177,12 +180,20 @@ fn test_sanitize_detail_preserves_known_probe_outcomes() {
 fn test_cli_quota_exclusivity_missing_args() {
     let bin = env!("CARGO_BIN_EXE_agyp");
 
-    // 1. Missing both --profile and --all without --json -> exit code 1
-    let out = Command::new(bin).args(["quota"]).output().unwrap();
+    // An empty profiles dir keeps these runs away from the real accounts.
+    let profiles = tempfile::tempdir().unwrap();
+
+    // 1. Human mode is the /usage report (all profiles when none is named); with no profiles
+    //    registered it fails without starting agy.
+    let out = Command::new(bin)
+        .args(["quota"])
+        .env("AGYP_PROFILES_DIR", profiles.path())
+        .output()
+        .unwrap();
     assert_eq!(out.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("Exactly one of --profile or --all is required"),
+        stderr.contains("No registered profiles found to check"),
         "Unexpected stderr: {stderr}"
     );
 
@@ -212,17 +223,16 @@ fn test_cli_quota_exclusivity_missing_args() {
 fn test_cli_quota_exclusivity_both_args() {
     let bin = env!("CARGO_BIN_EXE_agyp");
 
-    // 1. Both --profile and --all without --json -> exit code 1
+    let profiles = tempfile::tempdir().unwrap();
+
+    // 1. Human mode ignores the probe flags and shows the /usage report; with no profiles
+    //    registered it fails without starting agy.
     let out = Command::new(bin)
         .args(["quota", "--profile", "dev", "--all"])
+        .env("AGYP_PROFILES_DIR", profiles.path())
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(1));
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("Cannot specify both --profile and --all"),
-        "Unexpected stderr: {stderr}"
-    );
 
     // 2. Both with --json -> exit code 1 and valid JSON
     let out_json = Command::new(bin)
